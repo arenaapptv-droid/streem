@@ -7,9 +7,7 @@ with open("settings.json", "r") as f:
     settings = json.load(f)
     TOKEN = settings["TOKEN"]
     ADMIN_ID = settings["ADMIN_ID"]
-    LOGO_URL_1 = settings["LOGO_URL_1"]
-    LOGO_URL_2 = settings["LOGO_URL_2"]
-    SLATE_IMAGE_URL = settings["SLATE_IMAGE_URL"]
+    # يتم تجاهل LOGO_URL و SLATE_IMAGE_URL لعدم استخدامها
 
 CONFIG_FILE = "streams_config.json"
 active_streams = {}
@@ -22,10 +20,9 @@ def load_streams_config():
             with open(CONFIG_FILE, "r") as f:
                 return json.load(f)
         except: pass
-    # 9 بثوث افتراضية
     default = {}
     for i in range(1, 10):
-        default[f"stream_{i}"] = {"server": "", "key": "", "source": "", "logo": "1"}
+        default[f"stream_{i}"] = {"server": "", "key": ""}
     return default
 
 def save_streams_config(cfg):
@@ -33,8 +30,9 @@ def save_streams_config(cfg):
         json.dump(cfg, f, indent=2)
 
 streams_cfg = load_streams_config()
+pending_source = {}  # لتخزين المصدر مؤقتًا عند الطلب
 
-# ========== دوال قراءة حالة السيرفر (خاصة بشاشة المراقبة) ==========
+# ========== دوال حالة السيرفر ==========
 def get_cpu_usage():
     try:
         with open("/proc/stat", "r") as f:
@@ -106,14 +104,12 @@ def main_menu_keyboard():
             keyboard.append(row)
     if 9 % 2 == 1:
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("🖥️ حالة السيرفر", callback_data="server_status")])
+    keyboard.append([InlineKeyboardButton("🖥️ مراقبة السيرفر", callback_data="server_status")])
     return InlineKeyboardMarkup(keyboard)
 
 def stream_control_keyboard(stream_id: str):
     status = active_streams.get(stream_id)
     is_running = status is not None
-    cfg = streams_cfg.get(stream_id, {})
-    current_logo_num = cfg.get("logo", "1")
     keyboard = []
     if not is_running:
         keyboard.append([InlineKeyboardButton("▶️ تشغيل", callback_data=f"start_{stream_id}")])
@@ -122,7 +118,6 @@ def stream_control_keyboard(stream_id: str):
     keyboard.append([InlineKeyboardButton("🔄 تغيير المصدر", callback_data=f"change_{stream_id}")])
     keyboard.append([InlineKeyboardButton("🟡 شاشة توقف", callback_data=f"slate_{stream_id}")])
     keyboard.append([InlineKeyboardButton("⚙️ إعدادات السيرفر/المفتاح", callback_data=f"settings_{stream_id}")])
-    keyboard.append([InlineKeyboardButton(f"🏷 الشعار {current_logo_num}", callback_data=f"toggle_logo_{stream_id}")])
     keyboard.append([InlineKeyboardButton("🗑 حذف الإعدادات", callback_data=f"delete_{stream_id}")])
     keyboard.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")])
     return InlineKeyboardMarkup(keyboard)
@@ -201,12 +196,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if action == "source" and stream_id:
             context.user_data["mode"] = None
-            streams_cfg[stream_id]["source"] = text
-            save_streams_config(streams_cfg)
-            await update.message.reply_text(f"✅ تم حفظ المصدر لـ {stream_id}")
-            if context.user_data.get("start_after_source"):
-                context.user_data["start_after_source"] = False
-                asyncio.create_task(run_stream(stream_id, context))
+            pending_source[stream_id] = text
+            # بدء البث مباشرة بالمصدر الجديد
+            await update.message.reply_text(f"⏳ جاري تشغيل {stream_id}...")
+            asyncio.create_task(run_stream(stream_id, context))
             return
 
         elif action == "server" and stream_id:
@@ -231,7 +224,8 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
         await context.bot.send_message(ADMIN_ID, f"❌ بيانات السيرفر/المفتاح غير موجودة لـ {stream_id}")
         return
 
-    if not is_slate and (not cfg.get("source")):
+    input_url = pending_source.get(stream_id)
+    if not is_slate and not input_url:
         await context.bot.send_message(ADMIN_ID, f"❌ المصدر غير محدد لـ {stream_id}")
         return
 
@@ -240,14 +234,13 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
         return
 
     output_url = f"{cfg['server']}/{cfg['key']}"
-    input_url = cfg.get("source", "")
-    logo_num = cfg.get("logo", "1")
-    current_logo = LOGO_URL_1 if logo_num == "1" else LOGO_URL_2
 
+    # أمر FFmpeg: نسخ فيديو، ترميز صوت
     if is_slate:
+        # صورة ثابتة + صوت صامت
         cmd = [
             "ffmpeg", "-stream_loop", "-1", "-re",
-            "-i", SLATE_IMAGE_URL,
+            "-i", "https://i.postimg.cc/GmnKtYtL/20260508-163600.png",
             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
             "-c:v", "libx264", "-preset", "superfast", "-tune", "stillimage",
             "-crf", "30",
@@ -261,29 +254,14 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
             "ffmpeg",
             "-re",
             "-timeout", "5000000",
-            "-rw_timeout", "10000000",
-            "-fflags", "+genpts+discardcorrupt",
             "-i", input_url,
-            "-i", current_logo,
-            "-filter_complex",
-            "[1:v][0:v] scale2ref=iw:ih [logo][ref]; [ref][logo] overlay=0:0",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-tune", "zerolatency",
-            "-pix_fmt", "yuv420p",
-            "-g", "50",
-            "-r", "30",
-            "-crf", "24",
-            "-b:v", "3500k",
-            "-maxrate", "3500k",
-            "-bufsize", "7000k",
+            "-c:v", "copy",
             "-c:a", "aac",
             "-b:a", "128k",
             "-ar", "44100",
             "-ac", "2",
             "-flvflags", "no_duration_filesize",
             "-rtmp_live", "live",
-            "-threads", "6",
             "-f", "flv", output_url
         ]
 
@@ -302,7 +280,7 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
             await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=f"❌ فشل تشغيل {stream_id}: {e}")
             return
 
-        # فحص الفشل السريع
+        # فحص الفشل الفوري
         last_err = ""
         try:
             while True:
@@ -323,7 +301,7 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
             await asyncio.sleep(delay)
             continue
 
-        # الأزرار حسب الحالة
+        # الأزرار
         if is_slate:
             buttons = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 استئناف البث", callback_data=f"resume_{stream_id}"),
@@ -336,7 +314,7 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
                  InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{stream_id}"),
                  InlineKeyboardButton("🔄 تغيير المصدر", callback_data=f"change_{stream_id}")]
             ])
-            status_text = f"✅ {stream_id} يعمل"
+            status_text = f"🟢 {stream_id} يعمل"
 
         try:
             await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=status_text, reply_markup=buttons)
@@ -362,7 +340,7 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
                     decoded = line.decode("utf-8", errors="ignore").strip()
                     if "fps=" in decoded:
                         now = time.time()
-                        if now - last_update >= 5:  # تحديث كل 5 ثواني
+                        if now - last_update >= 5:
                             last_update = now
                             fps_match = re.search(r"fps=\s*([\d.]+)", decoded)
                             fps = fps_match.group(1) if fps_match else "0"
@@ -372,7 +350,7 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
                             sp = speed_match.group(1) if speed_match else "0"
 
                             text = (
-                                f"🟢 Rplay Server يعمل\n"
+                                f"🟢 {stream_id} يعمل\n"
                                 f"📊 فريمات : {fps}\n"
                                 f"⏰ الوقت : {t}\n"
                                 f"🚀 سرعة الرفع : {sp}x"
@@ -413,6 +391,7 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
     if stream_id in active_streams:
         del active_streams[stream_id]
     manual_stop_flags.pop(stream_id, None)
+    pending_source.pop(stream_id, None)
 
 # ========== الأزرار التفاعلية ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -446,21 +425,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not cfg or not cfg.get("server") or not cfg.get("key"):
                 await query.edit_message_text(f"❌ تحتاج إلى ضبط السيرفر والمفتاح لـ {stream_id} أولاً.")
                 return
-            if not cfg.get("source"):
-                context.user_data["mode"] = f"source_{stream_id}"
-                context.user_data["start_after_source"] = True
-                await query.edit_message_text(f"📥 أرسل رابط المصدر لـ {stream_id}:")
-            else:
-                await query.edit_message_text(f"⏳ جاري تشغيل {stream_id}...")
-                if stream_id in stream_tasks:
-                    stream_tasks[stream_id].cancel()
-                stream_tasks[stream_id] = asyncio.create_task(run_stream(stream_id, context))
+            # طلب المصدر فقط
+            context.user_data["mode"] = f"source_{stream_id}"
+            await query.edit_message_text(f"📥 أرسل رابط المصدر لـ {stream_id}:")
 
         elif action == "stop" and stream_id:
             await stop_stream(stream_id, context.bot, manual=True)
             await query.edit_message_text(f"⏹ {stream_id} تم الإيقاف")
 
         elif action == "change" and stream_id:
+            # طلب مصدر جديد (لا يشترط وجود بث قائم، لكن الأفضل وجوده)
+            if not active_streams.get(stream_id):
+                await query.edit_message_text(f"❌ لا يوجد بث نشط لـ {stream_id}")
+                return
             context.user_data["mode"] = f"source_{stream_id}"
             await query.edit_message_text(f"📥 أرسل رابط المصدر الجديد لـ {stream_id}:")
 
@@ -476,7 +453,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if stream_id in active_streams:
                 await stop_stream(stream_id, context.bot, manual=True)
                 await query.edit_message_text(f"🔙 جاري استئناف {stream_id}...")
-                stream_tasks[stream_id] = asyncio.create_task(run_stream(stream_id, context))
+                # استئناف يتطلب مصدرًا، لذا نطلب مصدرًا جديدًا
+                context.user_data["mode"] = f"source_{stream_id}"
+                await query.edit_message_text(f"📥 أرسل رابط المصدر الجديد لـ {stream_id}:")
             else:
                 await query.edit_message_text(f"❌ لا يوجد مصدر محفوظ لـ {stream_id}")
 
@@ -500,17 +479,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"🔑 أرسل المفتاح الجديد لـ {stream_id}:")
 
         elif action == "delete" and stream_id:
-            streams_cfg[stream_id] = {"server": "", "key": "", "source": "", "logo": "1"}
+            streams_cfg[stream_id] = {"server": "", "key": ""}
             save_streams_config(streams_cfg)
             await query.edit_message_text(f"🗑 تم حذف إعدادات {stream_id}")
 
-        elif action == "toggle_logo" and stream_id:
-            current = streams_cfg[stream_id].get("logo", "1")
-            new_logo = "2" if current == "1" else "1"
-            streams_cfg[stream_id]["logo"] = new_logo
-            save_streams_config(streams_cfg)
-            await query.edit_message_text(f"🏷 تم تغيير شعار {stream_id} إلى {new_logo}",
-                                         reply_markup=stream_control_keyboard(stream_id))
     else:
         await query.answer("غير معروف")
 
@@ -519,5 +491,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ Rplay Server – 9 Streams Pro يعمل...")
+    print("✅ Rplay Server – 9 Streams Copy Mode...")
     app.run_polling()
