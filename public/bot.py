@@ -11,28 +11,32 @@ with open("settings.json", "r") as f:
     LOGO_URL_2 = settings["LOGO_URL_2"]
     SLATE_IMAGE_URL = settings["SLATE_IMAGE_URL"]
 
-CONFIG_FILE = "stream_config.json"
-active_stream = None
-stream_lock = asyncio.Lock()
-manual_stop_requested = False
-stream_task = None
-status_task = None   # مهمة تحديث حالة السيرفر
+CONFIG_FILE = "streams_config.json"
+active_streams = {}        # {stream_id: {'process': ..., 'frame_msg_id': ..., 'manual_stop': bool, 'input_url': ...}}
+stream_tasks = {}          # {stream_id: asyncio.Task}
+stream_locks = {}          # {stream_id: asyncio.Lock}
+manual_stop_flags = {}     # {stream_id: bool}
 
-def load_stream_config():
+# ========== إدارة ملف الإعدادات ==========
+def load_streams_config():
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
                 return json.load(f)
         except: pass
-    return {}
+    # إعدادات افتراضية لـ 9 بثوث
+    default = {}
+    for i in range(1, 10):
+        default[f"stream_{i}"] = {"server": "", "key": "", "source": ""}
+    return default
 
-def save_stream_config(server, key):
+def save_streams_config(cfg):
     with open(CONFIG_FILE, "w") as f:
-        json.dump({"server": server, "key": key}, f)
+        json.dump(cfg, f, indent=2)
 
-config = load_stream_config()
+streams_cfg = load_streams_config()
 
-# ========== دوال قراءة حالة السيرفر ==========
+# ========== دوال حالة السيرفر ==========
 def get_cpu_usage():
     try:
         with open("/proc/stat", "r") as f:
@@ -85,6 +89,7 @@ def get_disk_usage():
         pass
     return "N/A", "N/A"
 
+# ========== دوال مساعدة ==========
 async def check_admin(update: Update) -> bool:
     if update.effective_user.id != ADMIN_ID:
         if update.message:
@@ -96,24 +101,68 @@ async def check_admin(update: Update) -> bool:
 
 def main_menu_keyboard():
     keyboard = []
-    if config.get("server") and config.get("key"):
-        keyboard.append([InlineKeyboardButton("▶️ بدء البث (نسخ مباشر)", callback_data="start_copy")])
-    keyboard.append([InlineKeyboardButton("⚙️ إعدادات السيرفر والمفتاح", callback_data="settings")])
+    # صفين من 5 أزرار لكل صف
+    for i in range(1, 10):
+        if i % 2 == 1:
+            row = [InlineKeyboardButton(f"🎬 Stream {i}", callback_data=f"menu_stream_{i}")]
+        else:
+            row.append(InlineKeyboardButton(f"🎬 Stream {i}", callback_data=f"menu_stream_{i}"))
+            keyboard.append(row)
+    if 9 % 2 == 1:  # إذا كان العدد فردي، نضيف الصف الأخير
+        keyboard.append(row)
     keyboard.append([InlineKeyboardButton("🖥️ مراقبة السيرفر", callback_data="server_status")])
     return InlineKeyboardMarkup(keyboard)
 
-async def stop_status_monitor():
-    global status_task
-    if status_task:
-        status_task.cancel()
+def stream_control_keyboard(stream_id: str):
+    """أزرار التحكم لبث واحد"""
+    status = active_streams.get(stream_id)
+    is_running = status is not None
+    keyboard = []
+    if not is_running:
+        keyboard.append([InlineKeyboardButton("▶️ تشغيل", callback_data=f"start_{stream_id}")])
+    else:
+        keyboard.append([InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{stream_id}")])
+    keyboard.append([InlineKeyboardButton("🔄 تغيير المصدر", callback_data=f"change_{stream_id}")])
+    keyboard.append([InlineKeyboardButton("🟡 شاشة توقف", callback_data=f"slate_{stream_id}")])
+    keyboard.append([InlineKeyboardButton("⚙️ إعدادات السيرفر/المفتاح", callback_data=f"settings_{stream_id}")])
+    keyboard.append([InlineKeyboardButton("🗑 حذف الإعدادات", callback_data=f"delete_{stream_id}")])
+    keyboard.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")])
+    return InlineKeyboardMarkup(keyboard)
+
+async def stop_stream(stream_id: str, bot, manual=False):
+    global manual_stop_flags
+    if stream_id in active_streams:
+        if manual:
+            manual_stop_flags[stream_id] = True
+        stream = active_streams[stream_id]
         try:
-            await status_task
+            stream["process"].kill()
+        except: pass
+        try:
+            await stream["process"].wait()
+        except: pass
+        try:
+            if stream.get("frame_msg_id"):
+                await bot.edit_message_text(
+                    chat_id=ADMIN_ID,
+                    message_id=stream["frame_msg_id"],
+                    text=f"⏹ تم إيقاف البث {stream_id}"
+                )
+        except: pass
+        del active_streams[stream_id]
+        manual_stop_flags.pop(stream_id, None)
+
+    # إلغاء المهمة إن وجدت
+    if stream_id in stream_tasks:
+        task = stream_tasks[stream_id]
+        task.cancel()
+        try:
+            await task
         except asyncio.CancelledError:
             pass
-        status_task = None
+        del stream_tasks[stream_id]
 
 async def update_server_status(query, chat_id, message_id):
-    """تحديث رسالة حالة السيرفر كل 5 ثوانٍ"""
     try:
         while True:
             cpu = get_cpu_usage()
@@ -139,82 +188,68 @@ async def update_server_status(query, chat_id, message_id):
     except asyncio.CancelledError:
         pass
 
-async def stop_active_stream(bot, manual=False):
-    global active_stream, manual_stop_requested, stream_task
-    async with stream_lock:
-        if active_stream:
-            if manual:
-                manual_stop_requested = True
-                active_stream["manual_stop"] = True
-            try:
-                active_stream["process"].kill()
-            except: pass
-            try:
-                await active_stream["process"].wait()
-            except: pass
-            try:
-                await bot.edit_message_text(
-                    chat_id=ADMIN_ID,
-                    message_id=active_stream["frame_msg_id"],
-                    text="⏹ تم إيقاف البث"
-                )
-            except: pass
-            active_stream = None
-        if stream_task:
-            stream_task.cancel()
-            try:
-                await stream_task
-            except asyncio.CancelledError:
-                pass
-            stream_task = None
-
+# ========== أوامر البوت ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_admin(update): return
-    await update.message.reply_text("🖥️ **Rplay Server – Copy Mode**", reply_markup=main_menu_keyboard())
+    await update.message.reply_text("🖥️ **Rplay Server – 9 Streams**", reply_markup=main_menu_keyboard())
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global stream_task
     if not await check_admin(update): return
     text = update.message.text.strip()
+    mode = context.user_data.get("mode")
 
-    if context.user_data.get("waiting_for_source"):
-        context.user_data["waiting_for_source"] = False
+    if mode and "_" in mode:
+        parts = mode.split("_", 1)
+        action = parts[0]
+        stream_id = parts[1] if len(parts) > 1 else ""
 
-        if stream_task and not stream_task.done():
-            await update.message.reply_text("❌ بث آخر قيد التشغيل حالياً. أوقفه أولاً.")
+        if action == "source" and stream_id:
+            # استلام مصدر لبث معين
+            context.user_data["mode"] = None
+            streams_cfg[stream_id]["source"] = text
+            save_streams_config(streams_cfg)
+            await update.message.reply_text(f"✅ تم حفظ المصدر لـ {stream_id}")
+            # إذا كان هناك طلب تشغيل معلق، نبدأ البث
+            if context.user_data.get("start_after_source"):
+                context.user_data["start_after_source"] = False
+                asyncio.create_task(run_stream(stream_id, context))
             return
 
-        await stop_active_stream(context.bot, manual=True)
-        await update.message.reply_text("⏳ جاري بدء البث (نسخ مباشر)...")
-        stream_task = asyncio.create_task(run_stream(context, text))
+        elif action == "server" and stream_id:
+            context.user_data["mode"] = None
+            streams_cfg[stream_id]["server"] = text
+            save_streams_config(streams_cfg)
+            await update.message.reply_text(f"✅ تم حفظ السيرفر لـ {stream_id}")
+            return
+
+        elif action == "key" and stream_id:
+            context.user_data["mode"] = None
+            streams_cfg[stream_id]["key"] = text
+            save_streams_config(streams_cfg)
+            await update.message.reply_text(f"✅ تم حفظ المفتاح لـ {stream_id}")
+            return
+
+async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slate: bool = False):
+    global active_streams, manual_stop_flags
+    cfg = streams_cfg.get(stream_id)
+
+    if not cfg or not cfg.get("server") or not cfg.get("key"):
+        await context.bot.send_message(ADMIN_ID, f"❌ بيانات السيرفر/المفتاح غير موجودة لـ {stream_id}")
         return
 
-    if context.user_data.get("waiting_for_server"):
-        context.user_data["waiting_for_server"] = False
-        config["server"] = text
-        save_stream_config(config.get("server"), config.get("key"))
-        await update.message.reply_text("✅ تم تحديث السيرفر")
-        await start(update, context)
+    if not is_slate and (not cfg.get("source")):
+        await context.bot.send_message(ADMIN_ID, f"❌ المصدر غير محدد لـ {stream_id}")
         return
 
-    if context.user_data.get("waiting_for_key"):
-        context.user_data["waiting_for_key"] = False
-        config["key"] = text
-        save_stream_config(config.get("server"), config.get("key"))
-        await update.message.reply_text("✅ تم تحديث المفتاح")
-        await start(update, context)
+    # منع تشغيل نفس البث مرتين
+    if stream_id in active_streams:
+        await context.bot.send_message(ADMIN_ID, f"❌ البث {stream_id} يعمل بالفعل")
         return
 
-async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, is_slate: bool = False):
-    global active_stream, manual_stop_requested
-    manual_stop_requested = False
+    output_url = f"{cfg['server']}/{cfg['key']}"
+    input_url = cfg.get("source", "")
 
-    if not config.get("server") or not config.get("key"):
-        await context.bot.send_message(ADMIN_ID, "❌ بيانات السيرفر/المفتاح غير موجودة")
-        return
-
-    output_url = f"{config['server']}/{config['key']}"
-
+    # أمر FFmpeg
     if is_slate:
         cmd = [
             "ffmpeg", "-stream_loop", "-1", "-re",
@@ -243,89 +278,90 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, is_slat
             "-f", "flv", output_url
         ]
 
-    status_msg = await context.bot.send_message(ADMIN_ID, "⏳ جاري تشغيل البث...")
-    msg_id = status_msg.message_id
+    # رسالة حالة
+    msg = await context.bot.send_message(ADMIN_ID, f"⏳ جاري تشغيل {stream_id}...")
+    msg_id = msg.message_id
 
     fail_count = 0
     max_fails = 10
 
-    while not manual_stop_requested and fail_count < max_fails:
+    while fail_count < max_fails and not manual_stop_flags.get(stream_id):
         try:
             process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
             )
         except Exception as e:
-            await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=f"❌ فشل تشغيل ffmpeg: {e}")
+            await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=f"❌ فشل تشغيل {stream_id}: {e}")
             return
 
-        last_err = ""
-        try:
-            while True:
-                line = await asyncio.wait_for(process.stderr.readline(), timeout=5)
-                if not line: break
-                last_err = line.decode("utf-8", errors="ignore").strip()
-        except asyncio.TimeoutError:
-            pass
-
-        await asyncio.sleep(1)
-
+        # انتظار قصير للتحقق من الفشل الفوري
+        await asyncio.sleep(3)
         if process.returncode is not None:
             fail_count += 1
             delay = min(10 * fail_count, 60)
             await context.bot.edit_message_text(
                 chat_id=ADMIN_ID, message_id=msg_id,
-                text=f"❌ فشل (كود {process.returncode}). {last_err}\nالمحاولة {fail_count} من {max_fails} خلال {delay}s..."
+                text=f"❌ فشل سريع ({stream_id})\nالمحاولة {fail_count} من {max_fails} خلال {delay}s..."
             )
             await asyncio.sleep(delay)
             continue
 
+        # الأزرار
         if is_slate:
             buttons = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 استئناف البث", callback_data="resume_stream"),
-                 InlineKeyboardButton("⏹ إيقاف البث", callback_data="stop_stream")]
+                [InlineKeyboardButton("🔙 استئناف البث", callback_data=f"resume_{stream_id}"),
+                 InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{stream_id}")]
             ])
-            status_text = "🟡 شاشة توقف"
+            status_text = f"🟡 {stream_id} شاشة توقف"
         else:
             buttons = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🟡 شاشة توقف", callback_data="slate"),
-                 InlineKeyboardButton("⏹ إيقاف البث", callback_data="stop_stream"),
-                 InlineKeyboardButton("🔄 تغيير المصدر", callback_data="change_source")]
+                [InlineKeyboardButton("🟡 شاشة توقف", callback_data=f"slate_{stream_id}"),
+                 InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{stream_id}"),
+                 InlineKeyboardButton("🔄 تغيير المصدر", callback_data=f"change_{stream_id}")]
             ])
-            status_text = "✅ تم بدء البث (نسخ مباشر)"
-
-        await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=status_text, reply_markup=buttons)
-
-        active_stream = {"process": process, "frame_msg_id": msg_id, "manual_stop": False, "input_url": input_url}
+            status_text = f"✅ {stream_id} يعمل (نسخ مباشر)"
 
         try:
-            while process.returncode is None and not manual_stop_requested:
+            await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=status_text, reply_markup=buttons)
+        except:
+            pass
+
+        active_streams[stream_id] = {
+            "process": process,
+            "frame_msg_id": msg_id,
+            "manual_stop": False,
+            "input_url": input_url
+        }
+
+        # مراقبة العملية
+        try:
+            while process.returncode is None and not manual_stop_flags.get(stream_id):
                 await asyncio.sleep(15)
                 try:
                     await context.bot.edit_message_text(
                         chat_id=ADMIN_ID, message_id=msg_id,
-                        text="🟢 البث يعمل (نسخ مباشر)",
+                        text=f"🟢 {stream_id} يعمل",
                         reply_markup=buttons
                     )
-                except: pass
+                except:
+                    pass
 
             retcode = await process.wait()
 
-            if manual_stop_requested:
-                await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text="⏹ تم إيقاف البث يدوياً.")
+            if manual_stop_flags.get(stream_id):
+                await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=f"⏹ {stream_id} تم إيقاف البث يدوياً")
                 break
 
             fail_count += 1
             delay = min(10 * fail_count, 60)
             await context.bot.edit_message_text(
                 chat_id=ADMIN_ID, message_id=msg_id,
-                text=f"⚠️ توقف البث (كود {retcode})\nإعادة المحاولة {fail_count} من {max_fails} خلال {delay} ثانية..."
+                text=f"⚠️ {stream_id} توقف (كود {retcode})\nإعادة المحاولة {fail_count} من {max_fails} خلال {delay} ثانية..."
             )
             await asyncio.sleep(delay)
 
         except Exception as e:
-            await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=f"❌ خطأ: {e}")
+            await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=f"❌ {stream_id} خطأ: {e}")
             try: process.kill()
             except: pass
             break
@@ -334,85 +370,110 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, is_slat
                 try: process.kill(); await process.wait()
                 except: pass
 
-    if active_stream:
-        active_stream = None
+    # تنظيف
+    if stream_id in active_streams:
+        del active_streams[stream_id]
+    manual_stop_flags.pop(stream_id, None)
 
 # ========== الأزرار التفاعلية ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global active_stream, manual_stop_requested, stream_task, status_task
+    global active_streams, manual_stop_flags
     query = update.callback_query
     await query.answer()
     data = query.data
     if not await check_admin(update): return
 
-    # إيقاف مراقبة الحالة قبل أي إجراء ما عدا نفس الزر
-    if data != "server_status" and data != "refresh_status":
-        await stop_status_monitor()
+    # التعامل مع زر مراقبة السيرفر
+    if data == "server_status":
+        # إيقاف أي مراقبة سابقة
+        if "status_task" in context.user_data:
+            context.user_data["status_task"].cancel()
+        task = asyncio.create_task(update_server_status(query, query.message.chat_id, query.message.message_id))
+        context.user_data["status_task"] = task
+        return
 
-    if data.startswith("start_") or data.startswith("resume") or data == "slate":
-        if stream_task and not stream_task.done():
-            await query.edit_message_text("❌ بث آخر قيد التشغيل. أوقفه أولاً.")
-            return
+    if data == "main_menu":
+        await query.edit_message_text("🖥️ **Rplay Server – 9 Streams**", reply_markup=main_menu_keyboard())
+        return
 
-    if data == "start_copy":
-        if not config.get("server") or not config.get("key"):
-            await query.edit_message_text("❌ تحتاج إلى ضبط السيرفر والمفتاح أولاً.")
-            return
-        context.user_data["waiting_for_source"] = True
-        await query.edit_message_text("📥 أرسل رابط المصدر (نسخ مباشر):")
-    elif data == "stop_stream":
-        if active_stream: await stop_active_stream(context.bot, manual=True)
-        else: await query.edit_message_text("❌ لا يوجد بث نشط.")
-    elif data == "slate":
-        if active_stream and active_stream.get("input_url"):
-            saved_input_url = active_stream["input_url"]
-            await stop_active_stream(context.bot, manual=True)
-            await query.edit_message_text("🟡 جاري تشغيل شاشة التوقف...")
-            stream_task = asyncio.create_task(run_stream(context, saved_input_url, is_slate=True))
-        else: await query.edit_message_text("❌ لا يوجد بث نشط.")
-    elif data == "resume_stream":
-        if active_stream and active_stream.get("input_url"):
-            saved_input_url = active_stream["input_url"]
-            await stop_active_stream(context.bot, manual=True)
-            await query.edit_message_text("🔙 جاري استئناف البث...")
-            stream_task = asyncio.create_task(run_stream(context, saved_input_url))
-        else: await query.edit_message_text("❌ لا يوجد مصدر محفوظ.")
-    elif data == "change_source":
-        if active_stream:
-            context.user_data["waiting_for_source"] = True
-            await query.edit_message_text("📥 أرسل رابط المصدر الجديد:")
-        else: await query.edit_message_text("❌ لا يوجد بث نشط.")
-    elif data == "settings":
-        server = config.get("server", "غير محدد")
-        key = config.get("key", "غير محدد")
-        await query.edit_message_text(
-            f"⚙️ **إعدادات Rplay Server**\n🔗 السيرفر: `{server}`\n🔑 المفتاح: `{key}`",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("تعديل السيرفر", callback_data="set_server")],
-                [InlineKeyboardButton("تعديل المفتاح", callback_data="set_key")],
-                [InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")],
-            ])
-        )
-    elif data == "set_server":
-        context.user_data["waiting_for_server"] = True
-        await query.edit_message_text("🔗 أرسل رابط السيرفر الجديد:")
-    elif data == "set_key":
-        context.user_data["waiting_for_key"] = True
-        await query.edit_message_text("🔑 أرسل المفتاح الجديد:")
-    elif data == "server_status" or data == "refresh_status":
-        # بدء المراقبة الحية
-        await stop_status_monitor()
-        chat_id = query.message.chat_id
-        message_id = query.message.message_id
-        status_task = asyncio.create_task(update_server_status(query, chat_id, message_id))
-    elif data == "main_menu":
-        await query.edit_message_text("🖥️ **Rplay Server – Copy Mode**", reply_markup=main_menu_keyboard())
+    # تحليل الزر
+    if "_" in data:
+        parts = data.split("_", 1)
+        action = parts[0]
+        stream_id = parts[1] if len(parts) > 1 else ""
+
+        if action == "menu" and stream_id:
+            await query.edit_message_text(f"🎛️ التحكم في {stream_id}", reply_markup=stream_control_keyboard(stream_id))
+
+        elif action == "start" and stream_id:
+            cfg = streams_cfg.get(stream_id)
+            if not cfg or not cfg.get("server") or not cfg.get("key"):
+                await query.edit_message_text(f"❌ تحتاج إلى ضبط السيرفر والمفتاح لـ {stream_id} أولاً.")
+                return
+            if not cfg.get("source"):
+                context.user_data["mode"] = f"source_{stream_id}"
+                context.user_data["start_after_source"] = True
+                await query.edit_message_text(f"📥 أرسل رابط المصدر لـ {stream_id}:")
+            else:
+                await query.edit_message_text(f"⏳ جاري تشغيل {stream_id}...")
+                if stream_id in stream_tasks:
+                    stream_tasks[stream_id].cancel()
+                stream_tasks[stream_id] = asyncio.create_task(run_stream(stream_id, context))
+
+        elif action == "stop" and stream_id:
+            await stop_stream(stream_id, context.bot, manual=True)
+            await query.edit_message_text(f"⏹ {stream_id} تم الإيقاف")
+
+        elif action == "change" and stream_id:
+            context.user_data["mode"] = f"source_{stream_id}"
+            await query.edit_message_text(f"📥 أرسل رابط المصدر الجديد لـ {stream_id}:")
+
+        elif action == "slate" and stream_id:
+            if stream_id in active_streams:
+                await stop_stream(stream_id, context.bot, manual=True)
+                await query.edit_message_text(f"🟡 جاري تشغيل شاشة التوقف لـ {stream_id}...")
+                stream_tasks[stream_id] = asyncio.create_task(run_stream(stream_id, context, is_slate=True))
+            else:
+                await query.edit_message_text(f"❌ {stream_id} لا يعمل حالياً")
+
+        elif action == "resume" and stream_id:
+            if stream_id in active_streams:
+                await stop_stream(stream_id, context.bot, manual=True)
+                await query.edit_message_text(f"🔙 جاري استئناف {stream_id}...")
+                stream_tasks[stream_id] = asyncio.create_task(run_stream(stream_id, context))
+            else:
+                await query.edit_message_text(f"❌ لا يوجد مصدر محفوظ لـ {stream_id}")
+
+        elif action == "settings" and stream_id:
+            cfg = streams_cfg.get(stream_id, {})
+            await query.edit_message_text(
+                f"⚙️ إعدادات {stream_id}\n🔗 السيرفر: {cfg.get('server', 'غير محدد')}\n🔑 المفتاح: {cfg.get('key', 'غير محدد')}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("تعديل السيرفر", callback_data=f"setsrv_{stream_id}")],
+                    [InlineKeyboardButton("تعديل المفتاح", callback_data=f"setkey_{stream_id}")],
+                    [InlineKeyboardButton("🔙 رجوع", callback_data=f"menu_{stream_id}")],
+                ])
+            )
+
+        elif action == "setsrv" and stream_id:
+            context.user_data["mode"] = f"server_{stream_id}"
+            await query.edit_message_text(f"🔗 أرسل رابط السيرفر الجديد لـ {stream_id}:")
+
+        elif action == "setkey" and stream_id:
+            context.user_data["mode"] = f"key_{stream_id}"
+            await query.edit_message_text(f"🔑 أرسل المفتاح الجديد لـ {stream_id}:")
+
+        elif action == "delete" and stream_id:
+            streams_cfg[stream_id] = {"server": "", "key": "", "source": ""}
+            save_streams_config(streams_cfg)
+            await query.edit_message_text(f"🗑 تم حذف إعدادات {stream_id}")
+    else:
+        await query.answer("غير معروف")
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ Rplay Server (مراقبة حية) يعمل...")
+    print("✅ Rplay Server – 9 Streams يعمل...")
     app.run_polling()
