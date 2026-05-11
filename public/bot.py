@@ -14,7 +14,6 @@ with open("settings.json", "r") as f:
 CONFIG_FILE = "streams_config.json"
 active_streams = {}
 stream_tasks = {}
-stream_locks = {}
 manual_stop_flags = {}
 
 def load_streams_config():
@@ -23,6 +22,7 @@ def load_streams_config():
             with open(CONFIG_FILE, "r") as f:
                 return json.load(f)
         except: pass
+    # 9 بثوث افتراضية
     default = {}
     for i in range(1, 10):
         default[f"stream_{i}"] = {"server": "", "key": "", "source": "", "logo": "1"}
@@ -34,7 +34,7 @@ def save_streams_config(cfg):
 
 streams_cfg = load_streams_config()
 
-# ========== حالة السيرفر ==========
+# ========== دوال قراءة حالة السيرفر (خاصة بشاشة المراقبة) ==========
 def get_cpu_usage():
     try:
         with open("/proc/stat", "r") as f:
@@ -106,7 +106,7 @@ def main_menu_keyboard():
             keyboard.append(row)
     if 9 % 2 == 1:
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("🖥️ مراقبة السيرفر", callback_data="server_status")])
+    keyboard.append([InlineKeyboardButton("🖥️ حالة السيرفر", callback_data="server_status")])
     return InlineKeyboardMarkup(keyboard)
 
 def stream_control_keyboard(stream_id: str):
@@ -323,7 +323,7 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
             await asyncio.sleep(delay)
             continue
 
-        # الأزرار
+        # الأزرار حسب الحالة
         if is_slate:
             buttons = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 استئناف البث", callback_data=f"resume_{stream_id}"),
@@ -353,7 +353,6 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
         last_update = time.time()
         try:
             while process.returncode is None and not manual_stop_flags.get(stream_id):
-                # قراءة stderr للحصول على fps
                 try:
                     line = await asyncio.wait_for(process.stderr.readline(), timeout=2)
                 except asyncio.TimeoutError:
@@ -363,7 +362,7 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
                     decoded = line.decode("utf-8", errors="ignore").strip()
                     if "fps=" in decoded:
                         now = time.time()
-                        if now - last_update >= 5:
+                        if now - last_update >= 5:  # تحديث كل 5 ثواني
                             last_update = now
                             fps_match = re.search(r"fps=\s*([\d.]+)", decoded)
                             fps = fps_match.group(1) if fps_match else "0"
@@ -372,16 +371,11 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
                             t = time_match.group(1) if time_match else "00:00:00"
                             sp = speed_match.group(1) if speed_match else "0"
 
-                            # موارد السيرفر
-                            cpu = get_cpu_usage()
-                            ram_used, ram_total = get_ram_usage()
-
                             text = (
-                                f"🟢 {stream_id} يعمل\n"
+                                f"🟢 Rplay Server يعمل\n"
                                 f"📊 فريمات : {fps}\n"
                                 f"⏰ الوقت : {t}\n"
-                                f"🚀 سرعة الرفع : {sp}x\n"
-                                f"🖥 CPU: {cpu:.1f}% | RAM: {ram_used} MiB / {ram_total} MiB"
+                                f"🚀 سرعة الرفع : {sp}x"
                             )
                             try:
                                 await context.bot.edit_message_text(
@@ -517,7 +511,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_streams_config(streams_cfg)
             await query.edit_message_text(f"🏷 تم تغيير شعار {stream_id} إلى {new_logo}",
                                          reply_markup=stream_control_keyboard(stream_id))
-
     else:
         await query.answer("غير معروف")
 
