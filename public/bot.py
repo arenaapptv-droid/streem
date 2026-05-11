@@ -9,7 +9,7 @@ with open("settings.json", "r") as f:
     ADMIN_ID = settings["ADMIN_ID"]
     LOGO_URL_1 = settings["LOGO_URL_1"]
     LOGO_URL_2 = settings["LOGO_URL_2"]
-    SLATE_VIDEO_URL = "https://files.catbox.moe/4liy8i.mp4"
+    SLATE_IMAGE_URL = settings["SLATE_IMAGE_URL"]    # الصورة الثابتة الموثوقة
 
 CONFIG_FILE = "stream_config.json"
 active_stream = None
@@ -31,7 +31,7 @@ def save_stream_config(server, key):
 
 config = load_stream_config()
 
-# ========== قراءة موارد الحاوية (مطابقة للوحة التحكم) ==========
+# ========== قراءة موارد الحاوية ==========
 def get_container_stats(prev_usage, prev_time):
     cpu_percent = 0.0
     mem_used = 0
@@ -161,23 +161,22 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, logo_ur
 
     output_url = f"{config['server']}/{config['key']}"
 
-    # --- أمر FFmpeg لشاشة التوقف (فيديو + صوت مع تكرار) ---
+    # --- أمر FFmpeg مع خيارات إعادة الاتصال ومقاومة التقطع ---
     if is_slate:
         cmd = [
             "ffmpeg",
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "5",
-            "-stream_loop", "-1",          # تكرار لانهائي
+            "-stream_loop", "-1",
             "-re",
-            "-i", SLATE_VIDEO_URL,
+            "-i", SLATE_IMAGE_URL,
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
             "-c:v", "libx264",
             "-preset", "ultrafast",
-            "-b:v", "5000k",              # جودة أعلى قليلاً
-            "-maxrate", "5000k",
-            "-bufsize", "10000k",
+            "-tune", "stillimage",
+            "-b:v", "500k",
+            "-maxrate", "500k",
+            "-bufsize", "1000k",
             "-c:a", "aac",
-            "-b:a", "128k",
+            "-b:a", "32k",
             "-ar", "44100",
             "-ac", "2",
             "-f", "flv", output_url
@@ -186,10 +185,10 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, logo_ur
         cmd = [
             "ffmpeg",
             "-re",
-            "-reconnect", "1",
+            "-reconnect", "1",                # إعادة الاتصال التلقائي
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
-            "-rw_timeout", "10000000",
+            "-rw_timeout", "10000000",        # صبر 10 ثوانٍ على البيانات
             "-fflags", "+genpts+discardcorrupt",
             "-i", input_url,
             "-i", current_logo,
