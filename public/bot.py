@@ -31,51 +31,6 @@ def save_stream_config(server, key):
 
 config = load_stream_config()
 
-# ========== قراءة موارد الحاوية ==========
-def get_container_stats(prev_usage, prev_time):
-    cpu_percent = 0.0
-    mem_used = 0
-    mem_total = 0
-    new_usage = 0
-    new_time = time.time()
-
-    try:
-        with open("/sys/fs/cgroup/cpu/cpuacct.usage", "r") as f:
-            usage_ns = int(f.read().strip())
-        with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "r") as f:
-            period_us = int(f.read().strip())
-        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "r") as f:
-            quota_us = int(f.read().strip())
-
-        cores = max(1, quota_us / period_us) if period_us > 0 else 1
-        if prev_usage and prev_time:
-            delta_ns = usage_ns - prev_usage
-            delta_sec = new_time - prev_time
-            if delta_sec > 0:
-                cpu_ratio = delta_ns / (delta_sec * 1e9)
-                cpu_percent = cpu_ratio * 100 * cores
-        new_usage = usage_ns
-    except:
-        cpu_percent = 0.0
-        new_usage = 0
-
-    try:
-        with open("/sys/fs/cgroup/memory/memory.usage_in_bytes", "r") as f:
-            mem_used = int(f.read().strip()) // 1048576
-        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes", "r") as f:
-            mem_total = int(f.read().strip()) // 1048576
-    except:
-        try:
-            with open("/sys/fs/cgroup/memory.current", "r") as f:
-                mem_used = int(f.read().strip()) // 1048576
-            with open("/sys/fs/cgroup/memory.max", "r") as f:
-                mem_total = int(f.read().strip()) // 1048576
-        except:
-            mem_used = mem_total = 0
-
-    return cpu_percent, mem_used, mem_total, new_usage, new_time
-
-# ========== دوال البوت ==========
 async def check_admin(update: Update) -> bool:
     if update.effective_user.id != ADMIN_ID:
         if update.message:
@@ -161,35 +116,21 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, logo_ur
 
     output_url = f"{config['server']}/{config['key']}"
 
-    # --- أمر FFmpeg مع خيارات إعادة الاتصال ومقاومة التقطع ---
+    # --- أمر FFmpeg المتوافق مع VPS (مطابق للأمر اليدوي الناجح) ---
     if is_slate:
         cmd = [
-            "ffmpeg",
-            "-stream_loop", "-1",
-            "-re",
+            "ffmpeg", "-stream_loop", "-1", "-re",
             "-i", SLATE_IMAGE_URL,
             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-tune", "stillimage",
-            "-b:v", "500k",
-            "-maxrate", "500k",
-            "-bufsize", "1000k",
-            "-c:a", "aac",
-            "-b:a", "32k",
-            "-ar", "44100",
-            "-ac", "2",
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
+            "-b:v", "500k", "-maxrate", "500k", "-bufsize", "1000k",
+            "-c:a", "aac", "-b:a", "32k", "-ar", "44100", "-ac", "2",
             "-f", "flv", output_url
         ]
     else:
         cmd = [
             "ffmpeg",
             "-re",
-            "-reconnect", "1",                # إعادة الاتصال التلقائي
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "5",
-            "-rw_timeout", "10000000",        # صبر 10 ثوانٍ على البيانات
-            "-fflags", "+genpts+discardcorrupt",
             "-i", input_url,
             "-i", current_logo,
             "-filter_complex",
@@ -204,54 +145,45 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, logo_ur
             "-b:a", "128k",
             "-ar", "44100",
             "-ac", "2",
+            "-flvflags", "no_duration_filesize",
+            "-rtmp_live", "live",
             "-f", "flv", output_url
         ]
 
     status_msg = await context.bot.send_message(ADMIN_ID, "⏳ جاري تشغيل البث...")
     msg_id = status_msg.message_id
 
-    prev_usage = 0
-    prev_time = 0
+    fail_count = 0
+    max_fails = 10
 
-    while not manual_stop_requested:
+    while not manual_stop_requested and fail_count < max_fails:
         try:
             process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
             )
         except Exception as e:
             await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=f"❌ فشل تشغيل ffmpeg: {e}")
             return
 
-        # الأزرار حسب الوضع
         if is_slate:
-            buttons = [
+            buttons = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 استئناف البث", callback_data="resume_stream"),
                  InlineKeyboardButton("⏹ إيقاف البث", callback_data="stop_stream")]
-            ]
+            ])
             status_text = "🟡 شاشة توقف"
         else:
-            buttons = [
+            buttons = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🟡 شاشة توقف", callback_data="slate"),
                  InlineKeyboardButton("⏹ إيقاف البث", callback_data="stop_stream"),
                  InlineKeyboardButton("🔄 تغيير المصدر", callback_data="change_source")],
                 [InlineKeyboardButton("🏷 الشعار 1", callback_data="logo_1"),
                  InlineKeyboardButton("🏷 الشعار 2", callback_data="logo_2")]
-            ]
+            ])
             status_text = "✅ تم بدء البث!"
 
-        await context.bot.edit_message_text(
-            chat_id=ADMIN_ID, message_id=msg_id, text=status_text,
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
+        await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=status_text, reply_markup=buttons)
 
-        active_stream = {
-            "process": process,
-            "frame_msg_id": msg_id,
-            "manual_stop": False,
-            "input_url": input_url
-        }
+        active_stream = {"process": process, "frame_msg_id": msg_id, "manual_stop": False, "input_url": input_url}
 
         last_update = time.time()
         try:
@@ -266,28 +198,10 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, logo_ur
                         last_update = now
                         fps_match = re.search(r"fps=\s*([\d.]+)", decoded)
                         fps = fps_match.group(1) if fps_match else "0"
-
-                        cpu, mem_used, mem_total, new_usage, new_time = get_container_stats(prev_usage, prev_time)
-                        prev_usage, prev_time = new_usage, new_time
-
-                        if is_slate:
-                            text = f"🟡 شاشة توقف\n📊 FPS: {fps}\n🖥 CPU: {cpu:.1f}% | RAM: {mem_used} MiB / {mem_total} MiB"
-                        else:
-                            time_match = re.search(r"time=(\d+:\d+:\d+\.\d+)", decoded)
-                            speed_match = re.search(r"speed=\s*([\d.]+)x", decoded)
-                            t = time_match.group(1) if time_match else "00:00:00"
-                            sp = speed_match.group(1) if speed_match else "0"
-                            text = (
-                                f"🟢 Rplay Server يعمل\n"
-                                f"📊 فريمات : {fps}\n"
-                                f"⏰ الوقت : {t}\n"
-                                f"🚀 سرعة الرفع : {sp}x\n"
-                                f"🖥 CPU: {cpu:.1f}% | RAM: {mem_used} MiB / {mem_total} MiB"
-                            )
                         try:
                             await context.bot.edit_message_text(
-                                chat_id=ADMIN_ID, message_id=msg_id, text=text,
-                                reply_markup=InlineKeyboardMarkup(buttons)
+                                chat_id=ADMIN_ID, message_id=msg_id,
+                                text=f"🟢 يعمل | FPS: {fps}", reply_markup=buttons
                             )
                         except: pass
                 await asyncio.sleep(0.1)
@@ -298,11 +212,13 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, logo_ur
                 await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text="⏹ تم إيقاف البث يدوياً.")
                 break
 
+            fail_count += 1
+            delay = min(10 * fail_count, 60)
             await context.bot.edit_message_text(
                 chat_id=ADMIN_ID, message_id=msg_id,
-                text=f"⚠️ توقف البث (كود {retcode})، إعادة بعد 3 ثوانٍ..."
+                text=f"⚠️ توقف البث (كود {retcode})\nإعادة المحاولة {fail_count} من {max_fails} خلال {delay} ثانية..."
             )
-            await asyncio.sleep(3)
+            await asyncio.sleep(delay)
 
         except Exception as e:
             await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=f"❌ خطأ: {e}")
@@ -311,9 +227,7 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, logo_ur
             break
         finally:
             if process.returncode is None:
-                try:
-                    process.kill()
-                    await process.wait()
+                try: process.kill(); await process.wait()
                 except: pass
 
     if active_stream:
@@ -426,5 +340,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ Rplay Server يعمل...")
+    print("✅ Rplay Server VPS يعمل...")
     app.run_polling()
