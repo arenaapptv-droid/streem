@@ -16,6 +16,7 @@ active_stream = None
 stream_lock = asyncio.Lock()
 manual_stop_requested = False
 stream_task = None
+status_task = None   # مهمة تحديث حالة السيرفر
 
 def load_stream_config():
     if os.path.exists(CONFIG_FILE):
@@ -33,7 +34,6 @@ config = load_stream_config()
 
 # ========== دوال قراءة حالة السيرفر ==========
 def get_cpu_usage():
-    """حساب نسبة استخدام CPU خلال آخر ثانية (تقريبي)"""
     try:
         with open("/proc/stat", "r") as f:
             line = f.readline()
@@ -42,7 +42,7 @@ def get_cpu_usage():
             user, nice, system, idle = map(int, parts[1:5])
             total1 = user + nice + system + idle
             idle1 = idle
-        time.sleep(0.1)  # انتظار قصير للقراءة الثانية
+        time.sleep(0.1)
         with open("/proc/stat", "r") as f:
             line = f.readline()
             parts = line.split()
@@ -58,7 +58,6 @@ def get_cpu_usage():
         return 0.0
 
 def get_ram_usage():
-    """الذاكرة المستخدمة والكلية بالميغابايت"""
     try:
         with open("/proc/meminfo", "r") as f:
             memtotal = 0
@@ -75,14 +74,13 @@ def get_ram_usage():
         return 0, 0
 
 def get_disk_usage():
-    """المساحة المستخدمة والكلية لجذر النظام (/) بالغيغابايت"""
     try:
         result = subprocess.run(["df", "-h", "/"], capture_output=True, text=True)
         lines = result.stdout.strip().split("\n")
         if len(lines) >= 2:
             parts = lines[1].split()
             if len(parts) >= 4:
-                return parts[2], parts[1]  # used, total
+                return parts[2], parts[1]
     except:
         pass
     return "N/A", "N/A"
@@ -101,8 +99,45 @@ def main_menu_keyboard():
     if config.get("server") and config.get("key"):
         keyboard.append([InlineKeyboardButton("▶️ بدء البث (نسخ مباشر)", callback_data="start_copy")])
     keyboard.append([InlineKeyboardButton("⚙️ إعدادات السيرفر والمفتاح", callback_data="settings")])
-    keyboard.append([InlineKeyboardButton("🖥️ حالة السيرفر", callback_data="server_status")])
+    keyboard.append([InlineKeyboardButton("🖥️ مراقبة السيرفر", callback_data="server_status")])
     return InlineKeyboardMarkup(keyboard)
+
+async def stop_status_monitor():
+    global status_task
+    if status_task:
+        status_task.cancel()
+        try:
+            await status_task
+        except asyncio.CancelledError:
+            pass
+        status_task = None
+
+async def update_server_status(query, chat_id, message_id):
+    """تحديث رسالة حالة السيرفر كل 5 ثوانٍ"""
+    try:
+        while True:
+            cpu = get_cpu_usage()
+            ram_used, ram_total = get_ram_usage()
+            disk_used, disk_total = get_disk_usage()
+            text = (
+                f"🖥️ **حالة السيرفر (مباشر)**\n"
+                f"CPU: {cpu:.1f}%\n"
+                f"RAM: {ram_used} MiB / {ram_total} MiB\n"
+                f"Disk: {disk_used} / {disk_total}"
+            )
+            try:
+                await query.edit_message_text(
+                    text, parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 تحديث الآن", callback_data="server_status"),
+                         InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")]
+                    ])
+                )
+            except:
+                pass
+            await asyncio.sleep(5)
+    except asyncio.CancelledError:
+        pass
 
 async def stop_active_stream(bot, manual=False):
     global active_stream, manual_stop_requested, stream_task
@@ -304,11 +339,15 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, is_slat
 
 # ========== الأزرار التفاعلية ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global active_stream, manual_stop_requested, stream_task
+    global active_stream, manual_stop_requested, stream_task, status_task
     query = update.callback_query
     await query.answer()
     data = query.data
     if not await check_admin(update): return
+
+    # إيقاف مراقبة الحالة قبل أي إجراء ما عدا نفس الزر
+    if data != "server_status" and data != "refresh_status":
+        await stop_status_monitor()
 
     if data.startswith("start_") or data.startswith("resume") or data == "slate":
         if stream_task and not stream_task.done():
@@ -361,17 +400,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "set_key":
         context.user_data["waiting_for_key"] = True
         await query.edit_message_text("🔑 أرسل المفتاح الجديد:")
-    elif data == "server_status":
-        cpu = get_cpu_usage()
-        ram_used, ram_total = get_ram_usage()
-        disk_used, disk_total = get_disk_usage()
-        msg = (
-            f"🖥️ **حالة السيرفر**\n"
-            f"CPU: {cpu:.1f}%\n"
-            f"RAM: {ram_used} MiB / {ram_total} MiB\n"
-            f"Disk: {disk_used} / {disk_total}"
-        )
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+    elif data == "server_status" or data == "refresh_status":
+        # بدء المراقبة الحية
+        await stop_status_monitor()
+        chat_id = query.message.chat_id
+        message_id = query.message.message_id
+        status_task = asyncio.create_task(update_server_status(query, chat_id, message_id))
     elif data == "main_menu":
         await query.edit_message_text("🖥️ **Rplay Server – Copy Mode**", reply_markup=main_menu_keyboard())
 
@@ -380,5 +414,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ Rplay Server (نسخ مباشر + مراقبة) يعمل...")
+    print("✅ Rplay Server (مراقبة حية) يعمل...")
     app.run_polling()
