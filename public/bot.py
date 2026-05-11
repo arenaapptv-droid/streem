@@ -113,23 +113,13 @@ def control_menu(stream_id):
 async def stop_stream(stream_id, bot, manual=False):
     global manual_stop_flags
     if stream_id in active_streams:
-        if manual: manual_stop_flags[stream_id] = True
+        if manual:
+            manual_stop_flags[stream_id] = True  # تثبيت العلامة
         s = active_streams[stream_id]
         try: s["process"].kill()
         except: pass
-        try: await s["process"].wait()
-        except: pass
-        try:
-            if s.get("frame_msg_id"):
-                await bot.edit_message_text(chat_id=ADMIN_ID, message_id=s["frame_msg_id"], text=f"⏹ Stream {stream_id.split('_')[1]} متوقف")
-        except: pass
-        del active_streams[stream_id]
-        manual_stop_flags.pop(stream_id, None)
-    if stream_id in stream_tasks:
-        stream_tasks[stream_id].cancel()
-        try: await stream_tasks[stream_id]
-        except asyncio.CancelledError: pass
-        del stream_tasks[stream_id]
+        # لا نقوم بمسح العلامة هنا، بل ننتظر حتى تلتقطها run_stream
+    # لا نلغي المهمة هنا، لأن المهمة نفسها هي التي ستلتقط العلامة
 
 async def server_monitor(query, chat_id, msg_id):
     try:
@@ -212,7 +202,7 @@ async def run_stream(stream_id, context, is_slate=False):
             proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
         except Exception as e:
             await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid, text=f"❌ فشل تشغيل {name}")
-            return
+            break
 
         # فحص سريع للفشل
         err = ""
@@ -225,12 +215,24 @@ async def run_stream(stream_id, context, is_slate=False):
         await asyncio.sleep(1)
 
         if proc.returncode is not None:
-            fail += 1
-            delay = min(10 * fail, 60)
-            await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid,
-                text=f"❌ فشل (كود {proc.returncode}). {err}\nالمحاولة {fail}/10 خلال {delay}s...")
-            await asyncio.sleep(delay)
-            continue
+            # إذا كان الإيقاف يدويًا أثناء الفحص، اخرج فورًا
+            if manual_stop_flags.get(stream_id):
+                break
+            if "404" in err:
+                txt = f"❌ المصدر غير موجود (404). تأكد من الرابط.\nالمصدر: {input_url}"
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 تغيير المصدر", callback_data=f"change_{stream_id}")],
+                    [InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")]
+                ])
+                await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid, text=txt, reply_markup=kb)
+                break
+            else:
+                fail += 1
+                delay = min(10 * fail, 60)
+                await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid,
+                    text=f"❌ فشل (كود {proc.returncode}). {err}\nالمحاولة {fail}/10 خلال {delay}s...")
+                await asyncio.sleep(delay)
+                continue
 
         # الأزرار
         if is_slate:
@@ -273,12 +275,12 @@ async def run_stream(stream_id, context, is_slate=False):
                             except: pass
                 await asyncio.sleep(0.1)
 
-            retcode = await proc.wait()
-            # التحقق من الإيقاف اليدوي لا يسبب إعادة تشغيل
+            # بعد الخروج من الحلقة الداخلية
             if manual_stop_flags.get(stream_id):
                 await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid, text=f"⏹ {name} تم الإيقاف يدوياً")
-                break
+                break  # يكسر الحلقة الخارجية مباشرة
 
+            retcode = await proc.wait()
             fail += 1
             delay = min(10 * fail, 60)
             await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid,
@@ -295,6 +297,7 @@ async def run_stream(stream_id, context, is_slate=False):
                 try: proc.kill(); await proc.wait()
                 except: pass
 
+    # تنظيف نهائي
     if stream_id in active_streams: del active_streams[stream_id]
     manual_stop_flags.pop(stream_id, None)
     pending_source.pop(stream_id, None)
@@ -327,17 +330,21 @@ async def button_handler(update, context):
             context.user_data["mode"] = f"source_{sid}"
             await q.edit_message_text(f"📥 أرسل رابط المصدر لـ Stream {num}:")
         elif act == "stop":
-            await stop_stream(sid, context.bot, manual=True)
-            await q.edit_message_text(f"⏹ Stream {num} متوقف")
+            # إيقاف يدوي
+            if sid in active_streams:
+                await stop_stream(sid, context.bot, manual=True)
+                # سيتم عرض رسالة الإيقاف في run_stream نفسها
+            else:
+                await q.edit_message_text(f"❌ Stream {num} لا يعمل")
         elif act == "change":
-            if not active_streams.get(sid):
-                await q.edit_message_text(f"❌ لا يوجد بث نشط لـ Stream {num}")
-                return
             context.user_data["mode"] = f"source_{sid}"
             await q.edit_message_text(f"📥 أرسل رابط المصدر الجديد لـ Stream {num}:")
         elif act == "slate":
             if sid in active_streams:
+                # لا نوقف البث يدوياً، سنوقف ثم نبدأ شاشة التوقف
                 await stop_stream(sid, context.bot, manual=True)
+                # انتظر قليلاً ثم ابدأ شاشة التوقف
+                await asyncio.sleep(1)
                 await q.edit_message_text(f"🟡 جاري شاشة التوقف لـ Stream {num}...")
                 stream_tasks[sid] = asyncio.create_task(run_stream(sid, context, is_slate=True))
             else:
@@ -345,6 +352,7 @@ async def button_handler(update, context):
         elif act == "resume":
             if sid in active_streams:
                 await stop_stream(sid, context.bot, manual=True)
+                await asyncio.sleep(1)
                 await q.edit_message_text(f"🔙 جاري استئناف Stream {num}...")
                 context.user_data["mode"] = f"source_{sid}"
                 await q.edit_message_text(f"📥 أرسل رابط المصدر لـ Stream {num}:")
