@@ -9,7 +9,7 @@ with open("settings.json", "r") as f:
     ADMIN_ID = settings["ADMIN_ID"]
     LOGO_URL_1 = settings["LOGO_URL_1"]
     LOGO_URL_2 = settings["LOGO_URL_2"]
-    SLATE_IMAGE_URL = settings["SLATE_IMAGE_URL"]    # الصورة الثابتة الموثوقة
+    SLATE_IMAGE_URL = settings["SLATE_IMAGE_URL"]
 
 CONFIG_FILE = "stream_config.json"
 active_stream = None
@@ -200,8 +200,6 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, logo_ur
             "-b:v", "9000k",
             "-maxrate", "9000k",
             "-bufsize", "18000k",
-            "-vsync", "cfr",
-            "-r", "30",
             "-c:a", "aac",
             "-b:a", "128k",
             "-ar", "44100",
