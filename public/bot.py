@@ -1,4 +1,4 @@
-import asyncio, time, json, os
+import asyncio, time, json, os, subprocess
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -31,6 +31,62 @@ def save_stream_config(server, key):
 
 config = load_stream_config()
 
+# ========== دوال قراءة حالة السيرفر ==========
+def get_cpu_usage():
+    """حساب نسبة استخدام CPU خلال آخر ثانية (تقريبي)"""
+    try:
+        with open("/proc/stat", "r") as f:
+            line = f.readline()
+            parts = line.split()
+            if parts[0] != "cpu": return 0.0
+            user, nice, system, idle = map(int, parts[1:5])
+            total1 = user + nice + system + idle
+            idle1 = idle
+        time.sleep(0.1)  # انتظار قصير للقراءة الثانية
+        with open("/proc/stat", "r") as f:
+            line = f.readline()
+            parts = line.split()
+            if parts[0] != "cpu": return 0.0
+            user, nice, system, idle = map(int, parts[1:5])
+            total2 = user + nice + system + idle
+            idle2 = idle
+        delta_total = total2 - total1
+        delta_idle = idle2 - idle1
+        if delta_total == 0: return 0.0
+        return 100.0 * (1.0 - delta_idle / delta_total)
+    except:
+        return 0.0
+
+def get_ram_usage():
+    """الذاكرة المستخدمة والكلية بالميغابايت"""
+    try:
+        with open("/proc/meminfo", "r") as f:
+            memtotal = 0
+            memavailable = 0
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    memtotal = int(line.split()[1])
+                elif line.startswith("MemAvailable:"):
+                    memavailable = int(line.split()[1])
+            used = (memtotal - memavailable) // 1024
+            total = memtotal // 1024
+            return used, total
+    except:
+        return 0, 0
+
+def get_disk_usage():
+    """المساحة المستخدمة والكلية لجذر النظام (/) بالغيغابايت"""
+    try:
+        result = subprocess.run(["df", "-h", "/"], capture_output=True, text=True)
+        lines = result.stdout.strip().split("\n")
+        if len(lines) >= 2:
+            parts = lines[1].split()
+            if len(parts) >= 4:
+                return parts[2], parts[1]  # used, total
+    except:
+        pass
+    return "N/A", "N/A"
+
 async def check_admin(update: Update) -> bool:
     if update.effective_user.id != ADMIN_ID:
         if update.message:
@@ -45,6 +101,7 @@ def main_menu_keyboard():
     if config.get("server") and config.get("key"):
         keyboard.append([InlineKeyboardButton("▶️ بدء البث (نسخ مباشر)", callback_data="start_copy")])
     keyboard.append([InlineKeyboardButton("⚙️ إعدادات السيرفر والمفتاح", callback_data="settings")])
+    keyboard.append([InlineKeyboardButton("🖥️ حالة السيرفر", callback_data="server_status")])
     return InlineKeyboardMarkup(keyboard)
 
 async def stop_active_stream(bot, manual=False):
@@ -123,7 +180,6 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, is_slat
 
     output_url = f"{config['server']}/{config['key']}"
 
-    # --- أمر FFmpeg: نسخ الفيديو، ترميز الصوت إلى AAC (بدون أي فلتر) ---
     if is_slate:
         cmd = [
             "ffmpeg", "-stream_loop", "-1", "-re",
@@ -142,8 +198,8 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, is_slat
             "-re",
             "-timeout", "5000000",
             "-i", input_url,
-            "-c:v", "copy",           # نسخ الفيديو بدون ترميز
-            "-c:a", "aac",            # ترميز الصوت إلى AAC فقط
+            "-c:v", "copy",
+            "-c:a", "aac",
             "-b:a", "128k",
             "-ar", "44100",
             "-ac", "2",
@@ -169,13 +225,11 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, is_slat
             await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=f"❌ فشل تشغيل ffmpeg: {e}")
             return
 
-        # التقاط أي خطأ فوري
         last_err = ""
         try:
             while True:
                 line = await asyncio.wait_for(process.stderr.readline(), timeout=5)
-                if not line:
-                    break
+                if not line: break
                 last_err = line.decode("utf-8", errors="ignore").strip()
         except asyncio.TimeoutError:
             pass
@@ -192,7 +246,6 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, is_slat
             await asyncio.sleep(delay)
             continue
 
-        # أزرار التحكم
         if is_slate:
             buttons = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 استئناف البث", callback_data="resume_stream"),
@@ -211,19 +264,16 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, is_slat
 
         active_stream = {"process": process, "frame_msg_id": msg_id, "manual_stop": False, "input_url": input_url}
 
-        # مراقبة مريحة
         try:
             while process.returncode is None and not manual_stop_requested:
                 await asyncio.sleep(15)
                 try:
                     await context.bot.edit_message_text(
-                        chat_id=ADMIN_ID,
-                        message_id=msg_id,
+                        chat_id=ADMIN_ID, message_id=msg_id,
                         text="🟢 البث يعمل (نسخ مباشر)",
                         reply_markup=buttons
                     )
-                except:
-                    pass
+                except: pass
 
             retcode = await process.wait()
 
@@ -311,6 +361,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "set_key":
         context.user_data["waiting_for_key"] = True
         await query.edit_message_text("🔑 أرسل المفتاح الجديد:")
+    elif data == "server_status":
+        cpu = get_cpu_usage()
+        ram_used, ram_total = get_ram_usage()
+        disk_used, disk_total = get_disk_usage()
+        msg = (
+            f"🖥️ **حالة السيرفر**\n"
+            f"CPU: {cpu:.1f}%\n"
+            f"RAM: {ram_used} MiB / {ram_total} MiB\n"
+            f"Disk: {disk_used} / {disk_total}"
+        )
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=main_menu_keyboard())
     elif data == "main_menu":
         await query.edit_message_text("🖥️ **Rplay Server – Copy Mode**", reply_markup=main_menu_keyboard())
 
@@ -319,5 +380,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ Rplay Server (نسخ مباشر) يعمل...")
+    print("✅ Rplay Server (نسخ مباشر + مراقبة) يعمل...")
     app.run_polling()
