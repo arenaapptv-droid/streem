@@ -1,4 +1,4 @@
-import asyncio, time, json, os, subprocess
+import asyncio, re, time, json, os, subprocess
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -12,22 +12,20 @@ with open("settings.json", "r") as f:
     SLATE_IMAGE_URL = settings["SLATE_IMAGE_URL"]
 
 CONFIG_FILE = "streams_config.json"
-active_streams = {}        # {stream_id: {'process': ..., 'frame_msg_id': ..., 'manual_stop': bool, 'input_url': ...}}
-stream_tasks = {}          # {stream_id: asyncio.Task}
-stream_locks = {}          # {stream_id: asyncio.Lock}
-manual_stop_flags = {}     # {stream_id: bool}
+active_streams = {}
+stream_tasks = {}
+stream_locks = {}
+manual_stop_flags = {}
 
-# ========== إدارة ملف الإعدادات ==========
 def load_streams_config():
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
                 return json.load(f)
         except: pass
-    # إعدادات افتراضية لـ 9 بثوث
     default = {}
     for i in range(1, 10):
-        default[f"stream_{i}"] = {"server": "", "key": "", "source": ""}
+        default[f"stream_{i}"] = {"server": "", "key": "", "source": "", "logo": "1"}
     return default
 
 def save_streams_config(cfg):
@@ -36,7 +34,7 @@ def save_streams_config(cfg):
 
 streams_cfg = load_streams_config()
 
-# ========== دوال حالة السيرفر ==========
+# ========== حالة السيرفر ==========
 def get_cpu_usage():
     try:
         with open("/proc/stat", "r") as f:
@@ -89,7 +87,6 @@ def get_disk_usage():
         pass
     return "N/A", "N/A"
 
-# ========== دوال مساعدة ==========
 async def check_admin(update: Update) -> bool:
     if update.effective_user.id != ADMIN_ID:
         if update.message:
@@ -101,22 +98,22 @@ async def check_admin(update: Update) -> bool:
 
 def main_menu_keyboard():
     keyboard = []
-    # صفين من 5 أزرار لكل صف
     for i in range(1, 10):
         if i % 2 == 1:
             row = [InlineKeyboardButton(f"🎬 Stream {i}", callback_data=f"menu_stream_{i}")]
         else:
             row.append(InlineKeyboardButton(f"🎬 Stream {i}", callback_data=f"menu_stream_{i}"))
             keyboard.append(row)
-    if 9 % 2 == 1:  # إذا كان العدد فردي، نضيف الصف الأخير
+    if 9 % 2 == 1:
         keyboard.append(row)
     keyboard.append([InlineKeyboardButton("🖥️ مراقبة السيرفر", callback_data="server_status")])
     return InlineKeyboardMarkup(keyboard)
 
 def stream_control_keyboard(stream_id: str):
-    """أزرار التحكم لبث واحد"""
     status = active_streams.get(stream_id)
     is_running = status is not None
+    cfg = streams_cfg.get(stream_id, {})
+    current_logo_num = cfg.get("logo", "1")
     keyboard = []
     if not is_running:
         keyboard.append([InlineKeyboardButton("▶️ تشغيل", callback_data=f"start_{stream_id}")])
@@ -125,6 +122,7 @@ def stream_control_keyboard(stream_id: str):
     keyboard.append([InlineKeyboardButton("🔄 تغيير المصدر", callback_data=f"change_{stream_id}")])
     keyboard.append([InlineKeyboardButton("🟡 شاشة توقف", callback_data=f"slate_{stream_id}")])
     keyboard.append([InlineKeyboardButton("⚙️ إعدادات السيرفر/المفتاح", callback_data=f"settings_{stream_id}")])
+    keyboard.append([InlineKeyboardButton(f"🏷 الشعار {current_logo_num}", callback_data=f"toggle_logo_{stream_id}")])
     keyboard.append([InlineKeyboardButton("🗑 حذف الإعدادات", callback_data=f"delete_{stream_id}")])
     keyboard.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")])
     return InlineKeyboardMarkup(keyboard)
@@ -152,7 +150,6 @@ async def stop_stream(stream_id: str, bot, manual=False):
         del active_streams[stream_id]
         manual_stop_flags.pop(stream_id, None)
 
-    # إلغاء المهمة إن وجدت
     if stream_id in stream_tasks:
         task = stream_tasks[stream_id]
         task.cancel()
@@ -188,7 +185,6 @@ async def update_server_status(query, chat_id, message_id):
     except asyncio.CancelledError:
         pass
 
-# ========== أوامر البوت ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_admin(update): return
     await update.message.reply_text("🖥️ **Rplay Server – 9 Streams**", reply_markup=main_menu_keyboard())
@@ -204,12 +200,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stream_id = parts[1] if len(parts) > 1 else ""
 
         if action == "source" and stream_id:
-            # استلام مصدر لبث معين
             context.user_data["mode"] = None
             streams_cfg[stream_id]["source"] = text
             save_streams_config(streams_cfg)
             await update.message.reply_text(f"✅ تم حفظ المصدر لـ {stream_id}")
-            # إذا كان هناك طلب تشغيل معلق، نبدأ البث
             if context.user_data.get("start_after_source"):
                 context.user_data["start_after_source"] = False
                 asyncio.create_task(run_stream(stream_id, context))
@@ -241,15 +235,15 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
         await context.bot.send_message(ADMIN_ID, f"❌ المصدر غير محدد لـ {stream_id}")
         return
 
-    # منع تشغيل نفس البث مرتين
     if stream_id in active_streams:
         await context.bot.send_message(ADMIN_ID, f"❌ البث {stream_id} يعمل بالفعل")
         return
 
     output_url = f"{cfg['server']}/{cfg['key']}"
     input_url = cfg.get("source", "")
+    logo_num = cfg.get("logo", "1")
+    current_logo = LOGO_URL_1 if logo_num == "1" else LOGO_URL_2
 
-    # أمر FFmpeg
     if is_slate:
         cmd = [
             "ffmpeg", "-stream_loop", "-1", "-re",
@@ -267,18 +261,32 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
             "ffmpeg",
             "-re",
             "-timeout", "5000000",
+            "-rw_timeout", "10000000",
+            "-fflags", "+genpts+discardcorrupt",
             "-i", input_url,
-            "-c:v", "copy",
+            "-i", current_logo,
+            "-filter_complex",
+            "[1:v][0:v] scale2ref=iw:ih [logo][ref]; [ref][logo] overlay=0:0",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-tune", "zerolatency",
+            "-pix_fmt", "yuv420p",
+            "-g", "50",
+            "-r", "30",
+            "-crf", "24",
+            "-b:v", "3500k",
+            "-maxrate", "3500k",
+            "-bufsize", "7000k",
             "-c:a", "aac",
             "-b:a", "128k",
             "-ar", "44100",
             "-ac", "2",
             "-flvflags", "no_duration_filesize",
             "-rtmp_live", "live",
+            "-threads", "6",
             "-f", "flv", output_url
         ]
 
-    # رسالة حالة
     msg = await context.bot.send_message(ADMIN_ID, f"⏳ جاري تشغيل {stream_id}...")
     msg_id = msg.message_id
 
@@ -288,20 +296,29 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
     while fail_count < max_fails and not manual_stop_flags.get(stream_id):
         try:
             process = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
             )
         except Exception as e:
             await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=f"❌ فشل تشغيل {stream_id}: {e}")
             return
 
-        # انتظار قصير للتحقق من الفشل الفوري
-        await asyncio.sleep(3)
+        # فحص الفشل السريع
+        last_err = ""
+        try:
+            while True:
+                line = await asyncio.wait_for(process.stderr.readline(), timeout=5)
+                if not line: break
+                last_err = line.decode("utf-8", errors="ignore").strip()
+        except asyncio.TimeoutError:
+            pass
+        await asyncio.sleep(1)
+
         if process.returncode is not None:
             fail_count += 1
             delay = min(10 * fail_count, 60)
             await context.bot.edit_message_text(
                 chat_id=ADMIN_ID, message_id=msg_id,
-                text=f"❌ فشل سريع ({stream_id})\nالمحاولة {fail_count} من {max_fails} خلال {delay}s..."
+                text=f"❌ فشل (كود {process.returncode}). {last_err}\nالمحاولة {fail_count} من {max_fails} خلال {delay}s..."
             )
             await asyncio.sleep(delay)
             continue
@@ -319,7 +336,7 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
                  InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{stream_id}"),
                  InlineKeyboardButton("🔄 تغيير المصدر", callback_data=f"change_{stream_id}")]
             ])
-            status_text = f"✅ {stream_id} يعمل (نسخ مباشر)"
+            status_text = f"✅ {stream_id} يعمل"
 
         try:
             await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg_id, text=status_text, reply_markup=buttons)
@@ -333,18 +350,47 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
             "input_url": input_url
         }
 
-        # مراقبة العملية
+        last_update = time.time()
         try:
             while process.returncode is None and not manual_stop_flags.get(stream_id):
-                await asyncio.sleep(15)
+                # قراءة stderr للحصول على fps
                 try:
-                    await context.bot.edit_message_text(
-                        chat_id=ADMIN_ID, message_id=msg_id,
-                        text=f"🟢 {stream_id} يعمل",
-                        reply_markup=buttons
-                    )
-                except:
-                    pass
+                    line = await asyncio.wait_for(process.stderr.readline(), timeout=2)
+                except asyncio.TimeoutError:
+                    line = b""
+
+                if line:
+                    decoded = line.decode("utf-8", errors="ignore").strip()
+                    if "fps=" in decoded:
+                        now = time.time()
+                        if now - last_update >= 5:
+                            last_update = now
+                            fps_match = re.search(r"fps=\s*([\d.]+)", decoded)
+                            fps = fps_match.group(1) if fps_match else "0"
+                            time_match = re.search(r"time=(\d+:\d+:\d+\.\d+)", decoded)
+                            speed_match = re.search(r"speed=\s*([\d.]+)x", decoded)
+                            t = time_match.group(1) if time_match else "00:00:00"
+                            sp = speed_match.group(1) if speed_match else "0"
+
+                            # موارد السيرفر
+                            cpu = get_cpu_usage()
+                            ram_used, ram_total = get_ram_usage()
+
+                            text = (
+                                f"🟢 {stream_id} يعمل\n"
+                                f"📊 فريمات : {fps}\n"
+                                f"⏰ الوقت : {t}\n"
+                                f"🚀 سرعة الرفع : {sp}x\n"
+                                f"🖥 CPU: {cpu:.1f}% | RAM: {ram_used} MiB / {ram_total} MiB"
+                            )
+                            try:
+                                await context.bot.edit_message_text(
+                                    chat_id=ADMIN_ID, message_id=msg_id,
+                                    text=text, reply_markup=buttons
+                                )
+                            except:
+                                pass
+                await asyncio.sleep(0.1)
 
             retcode = await process.wait()
 
@@ -370,7 +416,6 @@ async def run_stream(stream_id: str, context: ContextTypes.DEFAULT_TYPE, is_slat
                 try: process.kill(); await process.wait()
                 except: pass
 
-    # تنظيف
     if stream_id in active_streams:
         del active_streams[stream_id]
     manual_stop_flags.pop(stream_id, None)
@@ -383,9 +428,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     if not await check_admin(update): return
 
-    # التعامل مع زر مراقبة السيرفر
     if data == "server_status":
-        # إيقاف أي مراقبة سابقة
         if "status_task" in context.user_data:
             context.user_data["status_task"].cancel()
         task = asyncio.create_task(update_server_status(query, query.message.chat_id, query.message.message_id))
@@ -396,7 +439,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🖥️ **Rplay Server – 9 Streams**", reply_markup=main_menu_keyboard())
         return
 
-    # تحليل الزر
     if "_" in data:
         parts = data.split("_", 1)
         action = parts[0]
@@ -464,9 +506,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"🔑 أرسل المفتاح الجديد لـ {stream_id}:")
 
         elif action == "delete" and stream_id:
-            streams_cfg[stream_id] = {"server": "", "key": "", "source": ""}
+            streams_cfg[stream_id] = {"server": "", "key": "", "source": "", "logo": "1"}
             save_streams_config(streams_cfg)
             await query.edit_message_text(f"🗑 تم حذف إعدادات {stream_id}")
+
+        elif action == "toggle_logo" and stream_id:
+            current = streams_cfg[stream_id].get("logo", "1")
+            new_logo = "2" if current == "1" else "1"
+            streams_cfg[stream_id]["logo"] = new_logo
+            save_streams_config(streams_cfg)
+            await query.edit_message_text(f"🏷 تم تغيير شعار {stream_id} إلى {new_logo}",
+                                         reply_markup=stream_control_keyboard(stream_id))
+
     else:
         await query.answer("غير معروف")
 
@@ -475,5 +526,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ Rplay Server – 9 Streams يعمل...")
+    print("✅ Rplay Server – 9 Streams Pro يعمل...")
     app.run_polling()
