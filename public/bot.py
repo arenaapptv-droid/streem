@@ -116,7 +116,7 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, logo_ur
 
     output_url = f"{config['server']}/{config['key']}"
 
-    # --- أمر FFmpeg المتوافق مع VPS (مطابق للأمر اليدوي الناجح) ---
+    # --- أمر FFmpeg المُحسَّن (مع مهلة أطول) ---
     if is_slate:
         cmd = [
             "ffmpeg", "-stream_loop", "-1", "-re",
@@ -131,6 +131,9 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, logo_ur
         cmd = [
             "ffmpeg",
             "-re",
+            "-timeout", "8000000",        # 8 ثوانٍ لإنشاء الاتصال
+            "-rw_timeout", "10000000",    # 10 ثوانٍ لانتظار البيانات
+            "-fflags", "+genpts+discardcorrupt",
             "-i", input_url,
             "-i", current_logo,
             "-filter_complex",
@@ -233,13 +236,12 @@ async def run_stream(context: ContextTypes.DEFAULT_TYPE, input_url: str, logo_ur
     if active_stream:
         active_stream = None
 
-# ========== الأزرار التفاعلية ==========
+# ========== الأزرار التفاعلية (نفسها دون تغيير) ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global active_stream, manual_stop_requested, current_logo
     query = update.callback_query
     await query.answer()
     data = query.data
-
     if not await check_admin(update): return
 
     if data == "start_logo1":
@@ -249,7 +251,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["selected_logo"] = LOGO_URL_1
         context.user_data["waiting_for_source"] = True
         await query.edit_message_text("📥 أرسل رابط المصدر لبدء البث (الشعار 1):")
-
     elif data == "start_logo2":
         if not config.get("server") or not config.get("key"):
             await query.edit_message_text("❌ تحتاج إلى ضبط السيرفر والمفتاح أولاً.")
@@ -257,7 +258,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["selected_logo"] = LOGO_URL_2
         context.user_data["waiting_for_source"] = True
         await query.edit_message_text("📥 أرسل رابط المصدر لبدء البث (الشعار 2):")
-
     elif data == "logo_1":
         if active_stream and active_stream.get("input_url"):
             saved_input_url = active_stream["input_url"]
@@ -266,9 +266,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("🔄 جاري التبديل إلى الشعار 1...")
             await asyncio.sleep(2)
             asyncio.create_task(run_stream(context, saved_input_url, LOGO_URL_1))
-        else:
-            await query.edit_message_text("❌ لا يوجد بث نشط لتغيير الشعار.")
-
+        else: await query.edit_message_text("❌ لا يوجد بث نشط لتغيير الشعار.")
     elif data == "logo_2":
         if active_stream and active_stream.get("input_url"):
             saved_input_url = active_stream["input_url"]
@@ -277,9 +275,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("🔄 جاري التبديل إلى الشعار 2...")
             await asyncio.sleep(2)
             asyncio.create_task(run_stream(context, saved_input_url, LOGO_URL_2))
-        else:
-            await query.edit_message_text("❌ لا يوجد بث نشط لتغيير الشعار.")
-
+        else: await query.edit_message_text("❌ لا يوجد بث نشط لتغيير الشعار.")
     elif data == "settings":
         server = config.get("server", "غير محدد")
         key = config.get("key", "غير محدد")
@@ -292,46 +288,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")],
             ])
         )
-
     elif data == "set_server":
         context.user_data["waiting_for_server"] = True
         await query.edit_message_text("🔗 أرسل رابط السيرفر الجديد:")
-
     elif data == "set_key":
         context.user_data["waiting_for_key"] = True
         await query.edit_message_text("🔑 أرسل المفتاح الجديد:")
-
     elif data == "stop_stream":
-        if active_stream:
-            await stop_active_stream(context.bot, manual=True)
-        else:
-            await query.edit_message_text("❌ لا يوجد بث نشط.")
-
+        if active_stream: await stop_active_stream(context.bot, manual=True)
+        else: await query.edit_message_text("❌ لا يوجد بث نشط.")
     elif data == "slate":
         if active_stream and active_stream.get("input_url"):
             saved_input_url = active_stream["input_url"]
             await stop_active_stream(context.bot, manual=True)
             await query.edit_message_text("🟡 جاري تشغيل شاشة التوقف...")
             asyncio.create_task(run_stream(context, saved_input_url, is_slate=True))
-        else:
-            await query.edit_message_text("❌ لا يوجد بث نشط أو المصدر غير معروف.")
-
+        else: await query.edit_message_text("❌ لا يوجد بث نشط.")
     elif data == "resume_stream":
         if active_stream and active_stream.get("input_url"):
             saved_input_url = active_stream["input_url"]
             await stop_active_stream(context.bot, manual=True)
             await query.edit_message_text("🔙 جاري استئناف البث...")
             asyncio.create_task(run_stream(context, saved_input_url))
-        else:
-            await query.edit_message_text("❌ لا يوجد مصدر محفوظ للاستئناف.")
-
+        else: await query.edit_message_text("❌ لا يوجد مصدر محفوظ.")
     elif data == "change_source":
         if active_stream:
             context.user_data["waiting_for_source"] = True
             await query.edit_message_text("📥 أرسل رابط المصدر الجديد:")
-        else:
-            await query.edit_message_text("❌ لا يوجد بث نشط.")
-
+        else: await query.edit_message_text("❌ لا يوجد بث نشط.")
     elif data == "main_menu":
         await query.edit_message_text("🖥️ **Rplay Server**", reply_markup=main_menu_keyboard())
 
@@ -340,5 +324,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ Rplay Server VPS يعمل...")
+    print("✅ Rplay Server VPS جاهز...")
     app.run_polling()
