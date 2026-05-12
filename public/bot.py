@@ -41,7 +41,7 @@ def save_streams():
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RplayStreamer")
 
-# ========== متابعة المشاهدين (بدون تسرب) ==========
+# ========== متابعة المشاهدين (نظيفة) ==========
 viewers = defaultdict(set)
 viewer_last_seen = defaultdict(dict)
 
@@ -64,7 +64,7 @@ def clean_viewers():
         if sid in viewer_last_seen and not viewer_last_seen[sid]:
             viewer_last_seen.pop(sid, None)
 
-# ========== خادم HLS (بدون تحميل الملفات للذاكرة) ==========
+# ========== خادم HLS (خفيف) ==========
 async def handle_hls(request):
     name = request.match_info["name"]
     file = request.match_info.get("file", "index.m3u8")
@@ -148,7 +148,7 @@ def control_menu(sid):
 
 async def start(update, context):
     if not await check_admin(update): return
-    await update.message.reply_text("🖥 **Rplay Streamer Ultra**", reply_markup=main_menu())
+    await update.message.reply_text("🖥 **Rplay Streamer Lite**", reply_markup=main_menu())
 
 async def button_handler(update, context):
     q = update.callback_query
@@ -161,7 +161,7 @@ async def button_handler(update, context):
         if q.message.text != txt:
             await q.edit_message_text(txt, reply_markup=main_menu())
     elif d == "main_menu":
-        await q.edit_message_text("🖥 **Rplay Streamer Ultra**", reply_markup=main_menu())
+        await q.edit_message_text("🖥 **Rplay Streamer Lite**", reply_markup=main_menu())
 
     elif "_" in d:
         act, sid = d.split("_", 1)
@@ -208,36 +208,24 @@ async def start_stream(sid, bot):
     os.makedirs(out_dir, exist_ok=True)
     out_playlist = os.path.join(out_dir, "index.m3u8")
 
-    # --- أمر FFmpeg الأمثل للأداء ---
-    base = [
-        "ffmpeg",
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
-        "-rw_timeout", "10000000",
-        "-fflags", "+genpts+discardcorrupt",
-        "-analyzeduration", "10M",
-        "-probesize", "10M",
-        "-i", src,
-    ]
-
+    # --- أبسط أمر FFmpeg ممكن (مضمون) ---
     if logo:
-        cmd = base + [
+        cmd = [
+            "ffmpeg",
+            "-i", src,
             "-i", logo,
             "-filter_complex", "[0:v][1:v]overlay=0:0",
-            "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
-            "-g", "50", "-keyint_min", "50", "-sc_threshold", "0",
-            "-maxrate", "3500k", "-bufsize", "7000k",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
             "-c:a", "aac", "-b:a", "128k",
             "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
             "-hls_flags", "delete_segments",
             out_playlist
         ]
     else:
-        cmd = base + [
-            "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
-            "-g", "50", "-keyint_min", "50", "-sc_threshold", "0",
-            "-maxrate", "3500k", "-bufsize", "7000k",
+        cmd = [
+            "ffmpeg",
+            "-i", src,
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
             "-c:a", "aac", "-b:a", "128k",
             "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
             "-hls_flags", "delete_segments",
@@ -360,5 +348,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay Streamer Ultra - جاهز للإنتاج")
+    logger.info("Rplay Streamer Lite - يعمل بثبات")
     app.run_polling()
