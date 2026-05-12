@@ -17,7 +17,7 @@ HTTP_PORT = 8080
 BASE_URL = "http://164.68.102.28"
 
 STREAMS_FILE = "streams_pro.json"
-streams = {}   # فارغ تماماً في البداية
+streams = {}
 
 if os.path.exists(STREAMS_FILE):
     try:
@@ -30,6 +30,8 @@ if os.path.exists(STREAMS_FILE):
                 s_data.setdefault("uptime", "00:00:00")
                 s_data.setdefault("last_fps", "?")
                 s_data.setdefault("start_time", 0)
+                s_data.setdefault("panel_msg_id", None)
+                s_data.setdefault("panel_chat_id", None)
                 streams[sid] = s_data
     except (json.JSONDecodeError, KeyError):
         logger.error("Failed to parse streams_pro.json, starting fresh.")
@@ -47,9 +49,8 @@ def save_streams():
         json.dump(data, f, indent=2)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("RplayFinal")
+logger = logging.getLogger("RplayLivePanel")
 
-# ========== متابعة المشاهدين ==========
 viewer_last_seen = defaultdict(dict)
 
 async def track_viewer(request, stream_name):
@@ -73,7 +74,6 @@ def clean_viewers():
                 if ip in viewer_last_seen[sid]:
                     del viewer_last_seen[sid][ip]
 
-# ========== خادم HLS ==========
 async def handle_hls(request):
     name = request.match_info["name"]
     file = request.match_info.get("file", "index.m3u8")
@@ -96,7 +96,6 @@ async def start_http_server():
     await site.start()
     logger.info(f"HTTP server on port {HTTP_PORT}")
 
-# ========== حالة السيرفر ==========
 def get_system_status():
     cpu = 0.0
     try:
@@ -122,7 +121,6 @@ def get_system_status():
     except: pass
     return f"🖥 CPU: {cpu:.1f}% | RAM: {ram}"
 
-# ========== دوال البوت ==========
 async def check_admin(update):
     if update.effective_user.id != ADMIN_ID:
         if update.message: await update.message.reply_text("🚫 غير مصرح")
@@ -157,9 +155,10 @@ def stream_panel_keyboard(sid, s):
     ])
     kb.append([InlineKeyboardButton("🗑 حذف", callback_data=f"delete_{sid}")])
     if s.get("active"):
+        source_status = "🟢" if s.get("source_online") else "🔴"
         viewers = len(s.get("viewers", set()))
         uptime = s.get('uptime', '00:00:00')
-        info = f"FPS: {s.get('last_fps','?')} | ⏱️ {uptime} | 👥 {viewers}"
+        info = f"{source_status} FPS:{s.get('last_fps','?')} | ⏱️{uptime} | 👥{viewers}"
         kb.append([InlineKeyboardButton(info, callback_data="noop")])
     kb.append([InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")])
     return InlineKeyboardMarkup(kb)
@@ -187,6 +186,9 @@ async def button_handler(update, context):
         if not s:
             await q.edit_message_text("❌ البث غير موجود", reply_markup=main_menu())
             return
+        # حفظ معرف الرسالة لتحديثها تلقائياً لاحقاً
+        s["panel_msg_id"] = q.message.message_id
+        s["panel_chat_id"] = q.message.chat_id
         name = s.get("name", sid)
         await q.edit_message_text(
             f"🎛️ **{name}**\n"
@@ -252,16 +254,14 @@ async def msg_handler(update, context):
 
     if mode == "add_stream":
         context.user_data["mode"] = None
-        # إنشاء معرف فريد باستخدام الاسم وتاريخ الوقت
         raw_name = text.replace(' ', '_')
-        sid = f"{raw_name}_{int(time.time())}" if raw_name in streams else raw_name
-        if sid in streams:
-            sid = f"{raw_name}_{int(time.time())}"
+        sid = raw_name if raw_name not in streams else f"{raw_name}_{int(time.time())}"
         streams[sid] = {
             "name": text, "source": "", "logo": "", "user_agent": "",
             "active": False, "process": None, "fallback": False,
             "source_online": False, "viewers": set(), "last_fps": "?",
-            "uptime": "00:00:00"
+            "uptime": "00:00:00", "start_time": 0,
+            "panel_msg_id": None, "panel_chat_id": None
         }
         save_streams()
         await update.message.reply_text(f"✅ تم إضافة البث **{text}**\nاستخدم الأزرار لإعداده.", reply_markup=main_menu())
@@ -292,6 +292,34 @@ async def msg_handler(update, context):
             s["name"] = text
             save_streams()
             await update.message.reply_text(f"✅ تم تغيير الاسم من {old} إلى {text}")
+
+async def update_panel_message(sid, bot):
+    """تحديث رسالة لوحة التحكم الخاصة بالبث (إن كانت موجودة)"""
+    s = streams.get(sid)
+    if not s or not s.get("panel_msg_id") or not s.get("panel_chat_id"):
+        return
+    try:
+        name = s.get("name", sid)
+        source_status = "🟢" if s.get("source_online") else "🔴"
+        viewers = len(s.get("viewers", set()))
+        uptime = s.get('uptime', '00:00:00')
+        info = f"{source_status} FPS:{s.get('last_fps','?')} | ⏱️{uptime} | 👥{viewers}"
+        # نعيد بناء نص الرسالة بالكامل
+        text = (
+            f"🎛️ **{name}**\n"
+            f"📥 المصدر: {s['source'] or 'غير محدد'}\n"
+            f"🖼 الشعار: {'موجود' if s['logo'] else 'لا يوجد'}\n"
+            f"🕵️ UA: {s['user_agent'] or 'افتراضي'}\n"
+            f"🔗 الرابط: {BASE_URL}:{HTTP_PORT}/live/{sid}/index.m3u8"
+        )
+        await bot.edit_message_text(
+            chat_id=s["panel_chat_id"],
+            message_id=s["panel_msg_id"],
+            text=text,
+            reply_markup=stream_panel_keyboard(sid, s)
+        )
+    except Exception as e:
+        logger.error(f"Update panel error: {e}")
 
 async def start_stream(sid, bot):
     s = streams[sid]
@@ -375,14 +403,16 @@ async def start_stream(sid, bot):
 
         reader = asyncio.create_task(read_stderr())
 
+        # حلقة التحديث التلقائي للوحة
         while proc.returncode is None:
             clean_viewers()
-            # تحديث وقت التشغيل في نفس قاموس البث
-            streams[sid]["uptime"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
+            s["uptime"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
+            await update_panel_message(sid, bot)
             await asyncio.sleep(5)
 
         await proc.wait()
         s["source_online"] = False
+        await update_panel_message(sid, bot)  # تحديث فوري عند التوقف
 
         retries -= 1
         if retries > 0:
@@ -393,6 +423,8 @@ async def start_stream(sid, bot):
             fallback_proc = await asyncio.create_subprocess_exec(*fallback_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
             s["process"] = fallback_proc
             s["fallback"] = True
+            s["source_online"] = False
+            await update_panel_message(sid, bot)
             await asyncio.sleep(20)
             fallback_proc.kill()
             await fallback_proc.wait()
@@ -404,6 +436,7 @@ async def start_stream(sid, bot):
         s["process"].kill()
     s["active"] = False
     save_streams()
+    await update_panel_message(sid, bot)  # التحديث الأخير
 
 async def stop_stream(sid, bot):
     s = streams[sid]
@@ -413,6 +446,7 @@ async def stop_stream(sid, bot):
             s["process"].kill()
         except: pass
     save_streams()
+    await update_panel_message(sid, bot)
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
@@ -423,5 +457,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay Final - Named + Uptime")
+    logger.info("Rplay Live Panel Ready")
     app.run_polling()
