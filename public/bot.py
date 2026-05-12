@@ -14,7 +14,7 @@ HLS_DIR = "/tmp/hls"
 os.makedirs(HLS_DIR, exist_ok=True)
 
 HTTP_PORT = 8080
-BASE_URL = "http://164.68.102.28"   # غيّره إلى عنوان VPS الصحيح
+BASE_URL = "http://164.68.102.28"
 
 STREAMS_FILE = "streams_pro.json"
 streams = {}
@@ -41,30 +41,30 @@ def save_streams():
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RplayStreamer")
 
-# ========== متابعة المشاهدين ==========
-viewers = defaultdict(set)          # {stream_id: set(ip)}
-viewer_last_seen = defaultdict(dict)  # {stream_id: {ip: timestamp}}
+# ========== متابعة المشاهدين (بدون تسرب) ==========
+viewers = defaultdict(set)
+viewer_last_seen = defaultdict(dict)
 
 async def track_viewer(request, stream_name):
-    """تسجيل مشاهد عند طلب playlist أو segment"""
     ip = request.remote
     now = time.time()
-    if stream_name in viewers:
-        viewers[stream_name].add(ip)
-        viewer_last_seen[stream_name][ip] = now
-    else:
-        viewers[stream_name] = {ip}
-        viewer_last_seen[stream_name] = {ip: now}
+    viewers[stream_name].add(ip)
+    viewer_last_seen[stream_name][ip] = now
 
 def clean_viewers():
-    """حذف المشاهدين الذين لم يطلبوا شيئاً خلال 10 ثوانٍ"""
     now = time.time()
     for sid in list(viewers.keys()):
         for ip in list(viewers[sid]):
             if now - viewer_last_seen[sid].get(ip, 0) > 10:
                 viewers[sid].discard(ip)
+                if ip in viewer_last_seen[sid]:
+                    del viewer_last_seen[sid][ip]
+        if not viewers[sid]:
+            viewers.pop(sid, None)
+        if sid in viewer_last_seen and not viewer_last_seen[sid]:
+            viewer_last_seen.pop(sid, None)
 
-# ========== خادم HLS ==========
+# ========== خادم HLS (بدون تحميل الملفات للذاكرة) ==========
 async def handle_hls(request):
     name = request.match_info["name"]
     file = request.match_info.get("file", "index.m3u8")
@@ -72,12 +72,13 @@ async def handle_hls(request):
     if not os.path.exists(path):
         return web.Response(status=404)
 
-    # تسجيل هذا المشاهد
     await track_viewer(request, name)
 
-    with open(path, "rb") as f:
-        body = f.read()
-    return web.Response(body=body)
+    if path.endswith(".m3u8"):
+        return web.FileResponse(path, headers={"Content-Type": "application/vnd.apple.mpegurl"})
+    elif path.endswith(".ts"):
+        return web.FileResponse(path, headers={"Content-Type": "video/mp2t"})
+    return web.FileResponse(path)
 
 async def start_http_server():
     app = web.Application()
@@ -147,7 +148,7 @@ def control_menu(sid):
 
 async def start(update, context):
     if not await check_admin(update): return
-    await update.message.reply_text("🖥 **Rplay Streamer Pro**", reply_markup=main_menu())
+    await update.message.reply_text("🖥 **Rplay Streamer Ultra**", reply_markup=main_menu())
 
 async def button_handler(update, context):
     q = update.callback_query
@@ -160,7 +161,7 @@ async def button_handler(update, context):
         if q.message.text != txt:
             await q.edit_message_text(txt, reply_markup=main_menu())
     elif d == "main_menu":
-        await q.edit_message_text("🖥 **Rplay Streamer Pro**", reply_markup=main_menu())
+        await q.edit_message_text("🖥 **Rplay Streamer Ultra**", reply_markup=main_menu())
 
     elif "_" in d:
         act, sid = d.split("_", 1)
@@ -207,57 +208,71 @@ async def start_stream(sid, bot):
     os.makedirs(out_dir, exist_ok=True)
     out_playlist = os.path.join(out_dir, "index.m3u8")
 
-    # أمر FFmpeg مع تحويل H.265 إلى H.264 وإضافة شعار
+    # --- أمر FFmpeg الأمثل للأداء ---
+    base = [
+        "ffmpeg",
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+        "-rw_timeout", "10000000",
+        "-fflags", "+genpts+discardcorrupt",
+        "-analyzeduration", "10M",
+        "-probesize", "10M",
+        "-i", src,
+    ]
+
     if logo:
-        cmd = [
-            "ffmpeg",
-            "-re", "-i", src,
+        cmd = base + [
             "-i", logo,
-            "-filter_complex",
-            "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[base]; "
-            "[1:v]scale=1920:1080[logo]; [base][logo]overlay=0:0",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-filter_complex", "[0:v][1:v]overlay=0:0",
+            "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
+            "-g", "50", "-keyint_min", "50", "-sc_threshold", "0",
+            "-maxrate", "3500k", "-bufsize", "7000k",
             "-c:a", "aac", "-b:a", "128k",
             "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
             "-hls_flags", "delete_segments",
             out_playlist
         ]
     else:
-        cmd = [
-            "ffmpeg",
-            "-re", "-i", src,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        cmd = base + [
+            "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
+            "-g", "50", "-keyint_min", "50", "-sc_threshold", "0",
+            "-maxrate", "3500k", "-bufsize", "7000k",
             "-c:a", "aac", "-b:a", "128k",
             "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
             "-hls_flags", "delete_segments",
             out_playlist
         ]
 
+    last_err_lines = []
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE      # مهم لقراءة fps
+            stderr=asyncio.subprocess.PIPE
         )
         s["process"] = proc
         s["active"] = True
         start_time = time.time()
         save_streams()
 
-        # إرسال رسالة الحالة الأولية
         msg = await bot.send_message(ADMIN_ID, f"🟢 بدأ البث {sid}\n⏳ جاري التحميل...")
         s["status_msg_id"] = msg.message_id
 
-        # تحديث الإحصائيات بشكل دوري
         last_update = time.time()
         last_fps = "?"
         last_time_str = "00:00:00"
 
-        while proc.returncode is None:
-            # قراءة stderr لاستخراج fps
-            line = await proc.stderr.readline()
-            if line:
+        async def read_stderr():
+            nonlocal last_fps, last_time_str, last_err_lines
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
                 decoded = line.decode("utf-8", errors="ignore").strip()
+                last_err_lines.append(decoded)
+                if len(last_err_lines) > 3:
+                    last_err_lines.pop(0)
                 if "fps=" in decoded:
                     fps_match = re.search(r"fps=\s*([\d.]+)", decoded)
                     if fps_match:
@@ -266,7 +281,9 @@ async def start_stream(sid, bot):
                     if time_match:
                         last_time_str = time_match.group(1)
 
-            # تحديث واجهة المستخدم كل 5 ثوانٍ
+        reader = asyncio.create_task(read_stderr())
+
+        while proc.returncode is None:
             now = time.time()
             if now - last_update >= 5:
                 last_update = now
@@ -296,11 +313,14 @@ async def start_stream(sid, bot):
                     )
                 except:
                     pass
+            await asyncio.sleep(0.2)
 
-            await asyncio.sleep(0.1)
+        # العملية انتهت
+        retcode = await proc.wait()
+        with open("ffmpeg_errors.log", "a") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {sid} exit {retcode}\n")
+            f.write("\n".join(last_err_lines) + "\n\n")
 
-        # انتهى البث
-        await proc.wait()
     except Exception as e:
         logger.error(f"Failed to start stream {sid}: {e}")
         await bot.send_message(ADMIN_ID, f"❌ فشل تشغيل {sid}: {e}")
@@ -308,7 +328,6 @@ async def start_stream(sid, bot):
         s["active"] = False
         s["process"] = None
         save_streams()
-        # تحديث الرسالة الأخيرة
         if s.get("status_msg_id"):
             try:
                 await bot.edit_message_text(
@@ -341,5 +360,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay Streamer Pro with stats started")
+    logger.info("Rplay Streamer Ultra - جاهز للإنتاج")
     app.run_polling()
