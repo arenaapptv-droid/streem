@@ -1,5 +1,5 @@
 import asyncio, time, json, os, logging
-from aiohttp import web, ClientSession, ClientError
+from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -9,36 +9,56 @@ with open("settings.json", "r") as f:
     TOKEN = settings["TOKEN"]
     ADMIN_ID = settings["ADMIN_ID"]
 
-HLS_PORT = 8080
-BASE_URL = "http://164.68.102.28"
+HLS_DIR = "/tmp/hls"
+os.makedirs(HLS_DIR, exist_ok=True)
 
-STREAMS_FILE = "streams_hls.json"
+HTTP_PORT = 8080
+BASE_URL = "http://164.68.102.28"   # غيّره إلى عنوان VPS الصحيح
 
-# --- تهيئة آمنة للقاموس (تضمن وجود جميع المفاتيح) ---
-def init_streams():
-    default = {}
-    for i in range(1, 10):
-        default[f"stream_{i}"] = {"source": "", "active": False}
-    if os.path.exists(STREAMS_FILE):
-        try:
-            with open(STREAMS_FILE) as f:
-                saved = json.load(f)
-                # دمج القيم المحفوظة مع القيم الافتراضية
-                for k, v in default.items():
-                    if k in saved:
-                        default[k].update(saved[k])
-        except:
-            pass
-    return default
+STREAMS_FILE = "streams_pro.json"
+streams = {}
+for i in range(1, 10):
+    sid = f"stream_{i}"
+    streams[sid] = {"source": "", "logo": "", "active": False, "process": None}
 
-streams = init_streams()
+if os.path.exists(STREAMS_FILE):
+    try:
+        with open(STREAMS_FILE) as f:
+            saved = json.load(f)
+            for k, v in saved.items():
+                if k in streams:
+                    streams[k].update(v)
+    except: pass
 
 def save_streams():
+    data = {}
+    for sid, s in streams.items():
+        data[sid] = {"source": s["source"], "logo": s["logo"], "active": s["active"]}
     with open(STREAMS_FILE, "w") as f:
-        json.dump(streams, f, indent=2)
+        json.dump(data, f, indent=2)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("hls_proxy")
+logger = logging.getLogger("RplayStreamer")
+
+# ========== خادم HLS ثابت ==========
+async def handle_hls(request):
+    name = request.match_info["name"]
+    file = request.match_info.get("file", "index.m3u8")
+    path = os.path.join(HLS_DIR, name, file)
+    if not os.path.exists(path):
+        return web.Response(status=404)
+    with open(path, "rb") as f:
+        body = f.read()
+    return web.Response(body=body)
+
+async def start_http_server():
+    app = web.Application()
+    app.router.add_get("/live/{name}/{file:.*}", handle_hls)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)
+    await site.start()
+    logger.info(f"HTTP server running on port {HTTP_PORT}")
 
 # ========== حالة السيرفر ==========
 def get_system_status():
@@ -60,67 +80,17 @@ def get_system_status():
         if delta_total > 0:
             cpu = 100.0 * (1.0 - delta_idle / delta_total)
     except: pass
-
+    ram = "N/A"
     try:
-        with open("/proc/meminfo", "r") as mem:
+        with open("/proc/meminfo") as mem:
             lines = mem.readlines()
             total = int(lines[0].split()[1]) // 1024
             avail = int([l for l in lines if "MemAvailable" in l][0].split()[1]) // 1024
-            used = total - avail
-            ram = f"{used} / {total} MiB"
-    except:
-        ram = "N/A"
-
+            ram = f"{total - avail} / {total} MiB"
+    except: pass
     return f"🖥 CPU: {cpu:.1f}% | RAM: {ram}"
 
-# ========== وكيل HLS ==========
-async def proxy_hls(request):
-    name = request.match_info.get("name")  # مثلاً stream_1
-    # --- تصحيح: إزالة كلمة "stream_" إذا كانت موجودة في الرابط ---
-    stream_id = name if name.startswith("stream_") else f"stream_{name}"
-    
-    if stream_id not in streams:
-        logger.warning(f"Stream {stream_id} not found")
-        return web.Response(text="Stream not found", status=404)
-    
-    if not streams[stream_id].get("active"):
-        return web.Response(text="Stream not active", status=404)
-
-    source_url = streams[stream_id]["source"]
-    path = request.match_info.get("path", "")
-
-    if path:
-        base = source_url.rsplit("/", 1)[0]
-        target = f"{base}/{path}"
-    else:
-        target = source_url
-
-    logger.info(f"Proxying {stream_id} -> {target}")
-
-    try:
-        async with ClientSession() as session:
-            async with session.get(target, timeout=10) as resp:
-                if resp.status != 200:
-                    return web.Response(status=resp.status)
-                body = await resp.read()
-                return web.Response(body=body, content_type=resp.content_type)
-    except ClientError as e:
-        logger.error(f"Fetch error: {e}")
-        return web.Response(text="Bad gateway", status=502)
-    except asyncio.TimeoutError:
-        return web.Response(text="Gateway timeout", status=504)
-
-async def start_hls_server():
-    app = web.Application()
-    app.router.add_get("/live/{name}.m3u8", proxy_hls)
-    app.router.add_get("/live/{name}/{path:.*}", proxy_hls)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", HLS_PORT)
-    await site.start()
-    logger.info(f"HLS Proxy running on port {HLS_PORT}")
-
-# ========== تيليجرام ==========
+# ========== دوال البوت ==========
 async def check_admin(update):
     if update.effective_user.id != ADMIN_ID:
         if update.message: await update.message.reply_text("🚫 غير مصرح")
@@ -136,19 +106,20 @@ def main_menu():
     return InlineKeyboardMarkup(kb)
 
 def control_menu(sid):
-    s = streams.get(sid, {"source": "", "active": False})
+    s = streams[sid]
     kb = []
-    if s.get("active"):
+    if s["active"]:
         kb.append([InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{sid}")])
     else:
         kb.append([InlineKeyboardButton("▶️ تشغيل", callback_data=f"start_{sid}")])
-    kb.append([InlineKeyboardButton("🔄 تغيير المصدر", callback_data=f"change_{sid}")])
+    kb.append([InlineKeyboardButton("📥 إعداد المصدر", callback_data=f"source_{sid}")])
+    kb.append([InlineKeyboardButton("🖼 إعداد الشعار", callback_data=f"logo_{sid}")])
     kb.append([InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")])
     return InlineKeyboardMarkup(kb)
 
 async def start(update, context):
     if not await check_admin(update): return
-    await update.message.reply_text("🖥 **Rplay HLS Proxy**", reply_markup=main_menu())
+    await update.message.reply_text("🖥 **Rplay Streamer Pro**", reply_markup=main_menu())
 
 async def button_handler(update, context):
     q = update.callback_query
@@ -158,55 +129,125 @@ async def button_handler(update, context):
 
     if d == "status":
         txt = get_system_status()
-        if q.message.text == txt and q.message.reply_markup == main_menu():
-            return
-        await q.edit_message_text(txt, reply_markup=main_menu())
+        if q.message.text != txt:
+            await q.edit_message_text(txt, reply_markup=main_menu())
     elif d == "main_menu":
-        await q.edit_message_text("🖥 **Rplay HLS Proxy**", reply_markup=main_menu())
+        await q.edit_message_text("🖥 **Rplay Streamer Pro**", reply_markup=main_menu())
 
     elif "_" in d:
         act, sid = d.split("_", 1)
         if act == "menu":
             await q.edit_message_text(f"🎛 {sid}", reply_markup=control_menu(sid))
         elif act == "start":
-            if not streams[sid].get("source"):
-                await q.edit_message_text("❌ عيّن مصدرًا أولاً (تغيير المصدر)")
+            if not streams[sid]["source"]:
+                await q.edit_message_text("❌ الرجاء تعيين المصدر أولاً")
                 return
-            streams[sid]["active"] = True
-            save_streams()
-            url = f"{BASE_URL}:{HLS_PORT}/live/{sid}.m3u8"
-            await q.edit_message_text(f"✅ بدأ البث\n🔗 {url}", reply_markup=control_menu(sid))
+            asyncio.create_task(start_stream(sid, context.bot))
         elif act == "stop":
-            streams[sid]["active"] = False
-            save_streams()
-            await q.edit_message_text(f"⏹ تم إيقاف {sid}", reply_markup=control_menu(sid))
-        elif act == "change":
+            await stop_stream(sid, context.bot)
+        elif act == "source":
             context.user_data["mode"] = f"source_{sid}"
-            await q.edit_message_text(f"📥 أرسل رابط m3u8 لـ {sid}:")
-        elif act == "delete":
-            streams[sid] = {"source": "", "active": False}
-            save_streams()
-            await q.edit_message_text(f"🗑 مسحت إعدادات {sid}")
+            await q.edit_message_text(f"📥 أرسل رابط المصدر لـ {sid}:")
+        elif act == "logo":
+            context.user_data["mode"] = f"logo_{sid}"
+            await q.edit_message_text(f"🖼 أرسل رابط الشعار لـ {sid} (أو أرسل /skip لتخطي):")
 
 async def msg_handler(update, context):
     if not await check_admin(update): return
     text = update.message.text.strip()
     mode = context.user_data.get("mode")
-    if mode and mode.startswith("source_"):
-        sid = mode.split("_", 1)[1]
+    if mode and "_" in mode:
+        act, sid = mode.split("_", 1)
         context.user_data["mode"] = None
-        streams[sid]["source"] = text
+        if act == "source":
+            streams[sid]["source"] = text
+            save_streams()
+            await update.message.reply_text(f"✅ تم حفظ المصدر لـ {sid}")
+        elif act == "logo":
+            if text.lower() == "/skip":
+                streams[sid]["logo"] = ""
+            else:
+                streams[sid]["logo"] = text
+            save_streams()
+            await update.message.reply_text(f"✅ تم تحديث الشعار لـ {sid}")
+
+async def start_stream(sid, bot):
+    s = streams[sid]
+    src = s["source"]
+    logo = s.get("logo", "")
+    out_dir = os.path.join(HLS_DIR, sid)
+    os.makedirs(out_dir, exist_ok=True)
+    out_playlist = os.path.join(out_dir, "index.m3u8")
+
+    # أمر FFmpeg مع تحويل H.265 إلى H.264 وإضافة شعار
+    if logo:
+        cmd = [
+            "ffmpeg",
+            "-re", "-i", src,
+            "-i", logo,
+            "-filter_complex",
+            "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[base]; "
+            "[1:v]scale=1920:1080[logo]; [base][logo]overlay=0:0",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+            "-hls_flags", "delete_segments",
+            out_playlist
+        ]
+    else:
+        cmd = [
+            "ffmpeg",
+            "-re", "-i", src,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+            "-hls_flags", "delete_segments",
+            out_playlist
+        ]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        s["process"] = proc
+        s["active"] = True
         save_streams()
-        await update.message.reply_text(f"✅ تم حفظ المصدر لـ {sid}. يمكنك تشغيله الآن.")
+        url = f"{BASE_URL}:{HTTP_PORT}/live/{sid}/index.m3u8"
+        await bot.send_message(ADMIN_ID, f"✅ بدأ البث {sid}\n🔗 {url}")
+
+        # انتظار العملية
+        await proc.wait()
+    except Exception as e:
+        logger.error(f"Failed to start stream {sid}: {e}")
+        await bot.send_message(ADMIN_ID, f"❌ فشل تشغيل {sid}: {e}")
+    finally:
+        s["active"] = False
+        s["process"] = None
+        save_streams()
+        await bot.send_message(ADMIN_ID, f"⏹ توقف البث {sid}")
+
+async def stop_stream(sid, bot):
+    s = streams[sid]
+    if s.get("process"):
+        try:
+            s["process"].kill()
+            await s["process"].wait()
+        except: pass
+        s["active"] = False
+        s["process"] = None
+        save_streams()
+        await bot.send_message(ADMIN_ID, f"⏹ تم إيقاف {sid}")
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.create_task(start_hls_server())
+    loop.create_task(start_http_server())
 
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Bot starting...")
+    logger.info("Rplay Streamer Pro started")
     app.run_polling()
