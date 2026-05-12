@@ -20,7 +20,7 @@ STREAMS_FILE = "streams_pro.json"
 streams = {}
 for i in range(1, 10):
     sid = f"stream_{i}"
-    streams[sid] = {"source": "", "logo": "", "active": False, "process": None, "status_msg_id": None}
+    streams[sid] = {"source": "", "logo": "", "active": False, "process": None, "status_msg_id": None, "fallback": False}
 
 if os.path.exists(STREAMS_FILE):
     try:
@@ -148,7 +148,7 @@ def control_menu(sid):
 
 async def start(update, context):
     if not await check_admin(update): return
-    await update.message.reply_text("🖥 **Rplay Streamer Pro**", reply_markup=main_menu())
+    await update.message.reply_text("🖥 **Rplay Streamer**", reply_markup=main_menu())
 
 async def button_handler(update, context):
     q = update.callback_query
@@ -161,7 +161,7 @@ async def button_handler(update, context):
         if q.message.text != txt:
             await q.edit_message_text(txt, reply_markup=main_menu())
     elif d == "main_menu":
-        await q.edit_message_text("🖥 **Rplay Streamer Pro**", reply_markup=main_menu())
+        await q.edit_message_text("🖥 **Rplay Streamer**", reply_markup=main_menu())
 
     elif "_" in d:
         act, sid = d.split("_", 1)
@@ -171,6 +171,9 @@ async def button_handler(update, context):
             if not streams[sid]["source"]:
                 await q.edit_message_text("❌ الرجاء تعيين المصدر أولاً")
                 return
+            # إيقاف أي بث احتياطي قائم
+            await stop_stream(sid, context.bot)
+            streams[sid]["fallback"] = False
             asyncio.create_task(start_stream(sid, context.bot))
         elif act == "stop":
             await stop_stream(sid, context.bot)
@@ -191,40 +194,24 @@ async def msg_handler(update, context):
         if act == "source":
             streams[sid]["source"] = text
             save_streams()
-            await update.message.reply_text(f"✅ تم حفظ المصدر لـ {sid}")
-        elif act == "logo":
-            if text.lower() == "/skip":
-                streams[sid]["logo"] = ""
-            else:
-                streams[sid]["logo"] = text
-            save_streams()
-            await update.message.reply_text(f"✅ تم تحديث الشعار لـ {sid}")
+            await update.message.reply_text(f"✅ تم حفظ المصدر لـ {sid}. يمكنك تشغيله الآن.")
 
-async def start_stream(sid, bot):
+async def start_fallback_stream(sid, bot):
+    """شاشة سوداء مع الشعار تستمر للأبد"""
     s = streams[sid]
-    src = s["source"]
-    logo = s.get("logo", "")
     out_dir = os.path.join(HLS_DIR, sid)
     os.makedirs(out_dir, exist_ok=True)
     out_playlist = os.path.join(out_dir, "index.m3u8")
+    logo = s.get("logo", "")
 
-    # --- أمر FFmpeg المستقر مع reconnect والشعار الممدود ---
     if logo:
         cmd = [
             "ffmpeg",
             "-re",
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "5",
-            "-rw_timeout", "10000000",
-            "-fflags", "+genpts+discardcorrupt",
-            "-i", src,
+            "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=30",
             "-i", logo,
-            "-filter_complex",
-            "[1:v][0:v] scale2ref=iw:ih [logo][ref]; [ref][logo] overlay=0:0",
+            "-filter_complex", "[1:v][0:v] scale2ref=iw:ih [logo][ref]; [ref][logo] overlay=0:0",
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-            "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
-            "-vsync", "cfr", "-r", "30",
             "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
             "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
             "-hls_flags", "delete_segments",
@@ -234,34 +221,76 @@ async def start_stream(sid, bot):
         cmd = [
             "ffmpeg",
             "-re",
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "5",
-            "-rw_timeout", "10000000",
-            "-fflags", "+genpts+discardcorrupt",
-            "-i", src,
+            "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=30",
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-            "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
-            "-vsync", "cfr", "-r", "30",
             "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
             "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
             "-hls_flags", "delete_segments",
             out_playlist
         ]
 
-    last_err_lines = []
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE
-        )
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
         s["process"] = proc
         s["active"] = True
+        s["fallback"] = True
+        save_streams()
+        status_msg = await bot.send_message(ADMIN_ID, f"🖤 {sid} شاشة سوداء احتياطية تعمل")
+        s["status_msg_id"] = status_msg.message_id
+        await proc.wait()
+    except Exception as e:
+        logger.error(f"Fallback stream error {sid}: {e}")
+    finally:
+        s["active"] = False
+        s["process"] = None
+        save_streams()
+
+async def start_stream(sid, bot):
+    s = streams[sid]
+    src = s["source"]
+    logo = s.get("logo", "")
+    out_dir = os.path.join(HLS_DIR, sid)
+    os.makedirs(out_dir, exist_ok=True)
+    out_playlist = os.path.join(out_dir, "index.m3u8")
+
+    cmd = [
+        "ffmpeg",
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+        "-rw_timeout", "10000000",
+        "-fflags", "+genpts+discardcorrupt",
+        "-i", src
+    ]
+
+    if logo:
+        cmd += [
+            "-i", logo,
+            "-filter_complex", "[1:v][0:v] scale2ref=iw:ih [logo][ref]; [ref][logo] overlay=0:0"
+        ]
+
+    cmd += [
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-maxrate", "9000k", "-bufsize", "18000k",
+        "-pix_fmt", "yuv420p",
+        "-vsync", "cfr", "-r", "30",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+        "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+        "-hls_flags", "delete_segments",
+        out_playlist
+    ]
+
+    last_err_lines = []
+    try:
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        s["process"] = proc
+        s["active"] = True
+        s["fallback"] = False
         start_time = time.time()
         save_streams()
 
-        msg = await bot.send_message(ADMIN_ID, f"🟢 بدأ البث {sid}\n⏳ جاري التحميل...")
+        msg = await bot.send_message(ADMIN_ID, f"🟢 بدأ البث {sid}")
         s["status_msg_id"] = msg.message_id
 
         last_update = time.time()
@@ -272,19 +301,15 @@ async def start_stream(sid, bot):
             nonlocal last_fps, last_time_str, last_err_lines
             while True:
                 line = await proc.stderr.readline()
-                if not line:
-                    break
+                if not line: break
                 decoded = line.decode("utf-8", errors="ignore").strip()
                 last_err_lines.append(decoded)
-                if len(last_err_lines) > 3:
-                    last_err_lines.pop(0)
+                if len(last_err_lines) > 3: last_err_lines.pop(0)
                 if "fps=" in decoded:
-                    fps_match = re.search(r"fps=\s*([\d.]+)", decoded)
-                    if fps_match:
-                        last_fps = fps_match.group(1)
-                    time_match = re.search(r"time=(\d+:\d+:\d+\.\d+)", decoded)
-                    if time_match:
-                        last_time_str = time_match.group(1)
+                    m = re.search(r"fps=\s*([\d.]+)", decoded)
+                    if m: last_fps = m.group(1)
+                    m = re.search(r"time=(\d+:\d+:\d+\.\d+)", decoded)
+                    if m: last_time_str = m.group(1)
 
         reader = asyncio.create_task(read_stderr())
 
@@ -293,68 +318,55 @@ async def start_stream(sid, bot):
             if now - last_update >= 5:
                 last_update = now
                 clean_viewers()
-                uptime_seconds = int(now - start_time)
-                hours = uptime_seconds // 3600
-                minutes = (uptime_seconds % 3600) // 60
-                seconds = uptime_seconds % 60
+                uptime = int(now - start_time)
+                hours, minutes, seconds = uptime // 3600, (uptime % 3600) // 60, uptime % 60
                 uptime_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                viewer_count = len(viewers.get(sid, set()))
-
                 text = (
                     f"🟢 **{sid} يعمل**\n"
                     f"📊 FPS: {last_fps}\n"
                     f"⏱ الوقت: {last_time_str}\n"
                     f"🕒 مدة البث: {uptime_str}\n"
-                    f"👥 المشاهدين: {viewer_count}"
+                    f"👥 المشاهدين: {len(viewers.get(sid, set()))}"
                 )
                 try:
-                    await bot.edit_message_text(
-                        chat_id=ADMIN_ID,
-                        message_id=msg.message_id,
-                        text=text,
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{sid}")]
-                        ])
-                    )
-                except:
-                    pass
+                    await bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg.message_id, text=text,
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{sid}")]]))
+                except: pass
             await asyncio.sleep(0.2)
 
-        # العملية انتهت
         retcode = await proc.wait()
         with open("ffmpeg_errors.log", "a") as f:
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {sid} exit {retcode}\n")
             f.write("\n".join(last_err_lines) + "\n\n")
 
     except Exception as e:
-        logger.error(f"Failed to start stream {sid}: {e}")
+        logger.error(f"Stream {sid} error: {e}")
         await bot.send_message(ADMIN_ID, f"❌ فشل تشغيل {sid}: {e}")
     finally:
         s["active"] = False
         s["process"] = None
         save_streams()
-        if s.get("status_msg_id"):
-            try:
-                await bot.edit_message_text(
-                    chat_id=ADMIN_ID,
-                    message_id=s["status_msg_id"],
-                    text=f"⏹ توقف البث {sid}"
-                )
-            except:
-                pass
-            s["status_msg_id"] = None
+        # إذا لم يكن إيقاف يدوي، شغّل الشاشة السوداء فوراً
+        if not s.get("manual_stop"):
+            asyncio.create_task(start_fallback_stream(sid, bot))
+        else:
+            if s.get("status_msg_id"):
+                try:
+                    await bot.edit_message_text(chat_id=ADMIN_ID, message_id=s["status_msg_id"], text=f"⏹ توقف {sid}")
+                except: pass
 
 async def stop_stream(sid, bot):
     s = streams[sid]
+    s["manual_stop"] = True
     if s.get("process"):
         try:
             s["process"].kill()
             await s["process"].wait()
         except: pass
-        s["active"] = False
-        s["process"] = None
-        save_streams()
-        await bot.send_message(ADMIN_ID, f"⏹ تم إيقاف {sid}")
+    s["active"] = False
+    s["process"] = None
+    save_streams()
+    await bot.send_message(ADMIN_ID, f"⏹ تم إيقاف {sid}")
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
@@ -365,5 +377,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay Streamer - الإصدار المستقر")
+    logger.info("Rplay Streamer - Fallback Ready")
     app.run_polling()
