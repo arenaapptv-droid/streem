@@ -1,5 +1,5 @@
-import asyncio, time, json, os
-from aiohttp import web
+import asyncio, time, json, os, logging
+from aiohttp import web, ClientSession, ClientError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -10,7 +10,7 @@ with open("settings.json", "r") as f:
     ADMIN_ID = settings["ADMIN_ID"]
 
 HLS_PORT = 8080
-BASE_URL = "http://164.68.102.28"  # غيّره إلى عنوان VPS الحقيقي
+BASE_URL = "http://164.68.102.28"
 
 STREAMS_FILE = "streams_hls.json"
 streams = {f"stream_{i}": {"source": "", "active": False} for i in range(1, 10)}
@@ -21,6 +21,9 @@ if os.path.exists(STREAMS_FILE):
 def save_streams():
     with open(STREAMS_FILE, "w") as f:
         json.dump(streams, f, indent=2)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("hls_proxy")
 
 # ========== حالة السيرفر ==========
 def get_system_status():
@@ -41,8 +44,7 @@ def get_system_status():
         delta_idle = idle2 - idle1
         if delta_total > 0:
             cpu = 100.0 * (1.0 - delta_idle / delta_total)
-    except:
-        pass
+    except: pass
 
     try:
         with open("/proc/meminfo", "r") as mem:
@@ -58,26 +60,40 @@ def get_system_status():
 
 # ========== وكيل HLS ==========
 async def proxy_hls(request):
-    name = request.match_info.get("name")
-    stream_id = None
-    for sid, s in streams.items():
-        if s.get("active") and f"stream_{name.split('_')[-1]}" == sid:
-            stream_id = sid
-            break
-    if not stream_id:
-        return web.Response(status=404)
+    name = request.match_info.get("name")  # مثلاً stream_1
+    stream_id = name if name in streams else None
+
+    if not stream_id or not streams[stream_id].get("active"):
+        logger.warning(f"Stream {name} not active or not found")
+        return web.Response(text="Stream not active", status=404)
 
     source_url = streams[stream_id]["source"]
     path = request.match_info.get("path", "")
-    target = source_url.rsplit("/", 1)[0] + "/" + path if path else source_url
+
+    # بناء URL الكامل للمصدر
+    if path:
+        # إذا كان المقطع يأتي بمسار إضافي (مثلاً stream_1/segment.ts)
+        base = source_url.rsplit("/", 1)[0]
+        target = f"{base}/{path}"
+    else:
+        target = source_url
+
+    logger.info(f"Proxying {name} -> {target}")
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with ClientSession() as session:
             async with session.get(target, timeout=10) as resp:
+                if resp.status != 200:
+                    logger.error(f"Upstream returned {resp.status} for {target}")
+                    return web.Response(status=resp.status)
                 body = await resp.read()
                 return web.Response(body=body, content_type=resp.content_type)
-    except:
-        return web.Response(status=502)
+    except ClientError as e:
+        logger.error(f"Fetch error: {e}")
+        return web.Response(text="Bad gateway", status=502)
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout fetching {target}")
+        return web.Response(text="Gateway timeout", status=504)
 
 async def start_hls_server():
     app = web.Application()
@@ -87,9 +103,9 @@ async def start_hls_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", HLS_PORT)
     await site.start()
-    print(f"✅ HLS Proxy on port {HLS_PORT}")
+    logger.info(f"HLS Proxy running on port {HLS_PORT}")
 
-# ========== دوال تيليجرام ==========
+# ========== تيليجرام ==========
 async def check_admin(update):
     if update.effective_user.id != ADMIN_ID:
         if update.message: await update.message.reply_text("🚫 غير مصرح")
@@ -126,13 +142,10 @@ async def button_handler(update, context):
     if not await check_admin(update): return
 
     if d == "status":
-        status_text = get_system_status()
-        current_text = q.message.text
-        current_markup = q.message.reply_markup
-        # تجنب التعديل إذا كانت الرسالة نفسها
-        if current_text == status_text and current_markup == main_menu():
+        txt = get_system_status()
+        if q.message.text == txt and q.message.reply_markup == main_menu():
             return
-        await q.edit_message_text(status_text, reply_markup=main_menu())
+        await q.edit_message_text(txt, reply_markup=main_menu())
     elif d == "main_menu":
         await q.edit_message_text("🖥 **Rplay HLS Proxy**", reply_markup=main_menu())
 
@@ -146,7 +159,7 @@ async def button_handler(update, context):
                 return
             streams[sid]["active"] = True
             save_streams()
-            url = f"{BASE_URL}:{HLS_PORT}/live/{sid.replace('_', '')}.m3u8"
+            url = f"{BASE_URL}:{HLS_PORT}/live/{sid}.m3u8"
             await q.edit_message_text(f"✅ بدأ البث\n🔗 {url}", reply_markup=control_menu(sid))
         elif act == "stop":
             streams[sid]["active"] = False
@@ -180,5 +193,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    print("✅ البوت يعمل...")
+    logger.info("Bot starting...")
     app.run_polling()
