@@ -1,4 +1,4 @@
-import asyncio, re, time, json, os, subprocess
+import asyncio, re, time, json, os, threading, subprocess
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -11,9 +11,8 @@ with open("settings.json", "r") as f:
 
 STREAMS_FILE = "streams_config.json"
 
-# بنية البثوث النشطة
-active = {}          # {stream_id: {"proc": process, "msg": int, "stop": threading.Event}}
-pending_source = {}  # {stream_id: str}   # رابط المصدر المؤقت
+active = {}
+pending_source = {}
 
 def load_config():
     if os.path.exists(STREAMS_FILE):
@@ -29,7 +28,6 @@ def save_config(cfg):
 
 streams_cfg = load_config()
 
-# ==================== موارد السيرفر ====================
 def cpu_usage():
     try:
         with open("/proc/stat") as f:
@@ -55,7 +53,6 @@ def ram_usage():
             return (total - avail) // 1024, total // 1024
     except: return 0, 0
 
-# ==================== الأدوات ====================
 async def check_admin(update: Update) -> bool:
     if update.effective_user.id != ADMIN_ID:
         if update.message:
@@ -90,10 +87,9 @@ def control_menu(sid):
     kb.append([InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")])
     return InlineKeyboardMarkup(kb)
 
-# ==================== إيقاف بث ====================
 async def stop_stream(sid, bot):
     if sid in active:
-        active[sid]["stop"].set()          # إشارة للتوقف
+        active[sid]["stop"].set()
         try:
             active[sid]["proc"].kill()
         except: pass
@@ -107,7 +103,6 @@ async def stop_stream(sid, bot):
         except: pass
         del active[sid]
 
-# ==================== تشغيل البث ====================
 async def stream_runner(sid, context, is_slate=False):
     cfg = streams_cfg.get(sid)
     if not cfg or not cfg.get("server") or not cfg.get("key"):
@@ -124,7 +119,6 @@ async def stream_runner(sid, context, is_slate=False):
     out = f"{cfg['server']}/{cfg['key']}"
     name = f"Stream {sid.split('_')[1]}"
 
-    # إعدادات FFmpeg مع User‑Agent ExoPlayer
     if is_slate:
         cmd = [
             "ffmpeg", "-re", "-loop", "1", "-i", SLATE_IMAGE,
@@ -163,7 +157,6 @@ async def stream_runner(sid, context, is_slate=False):
                                                 text=f"❌ فشل تشغيل {name}: {e}")
             break
 
-        # انتظار قصير لبدء البث
         await asyncio.sleep(2)
         if proc.returncode is not None and not stop_ev.is_set():
             retries += 1
@@ -173,7 +166,6 @@ async def stream_runner(sid, context, is_slate=False):
             await asyncio.sleep(delay)
             continue
 
-        # تحديث واجهة "يعمل"
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{sid}"),
              InlineKeyboardButton("🔄 تغيير", callback_data=f"change_{sid}")]
@@ -219,7 +211,10 @@ async def stream_runner(sid, context, is_slate=False):
     if sid in pending_source:
         del pending_source[sid]
 
-# ==================== الأزرار ====================
+async def start(update, context):
+    if not await check_admin(update): return
+    await update.message.reply_text("🖥 **Rplay Streaming Panel**", reply_markup=main_menu())
+
 async def button_handler(update, context):
     q = update.callback_query
     await q.answer()
@@ -273,7 +268,6 @@ async def button_handler(update, context):
             save_config(streams_cfg)
             await q.edit_message_text(f"🗑 تم مسح إعدادات {sid}")
 
-# ==================== استقبال النصوص (روابط) ====================
 async def msg_handler(update, context):
     if not await check_admin(update): return
     text = update.message.text.strip()
