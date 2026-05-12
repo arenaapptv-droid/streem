@@ -1,4 +1,5 @@
-import asyncio, time, json, os, logging
+import asyncio, time, json, os, logging, re
+from collections import defaultdict
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -19,7 +20,7 @@ STREAMS_FILE = "streams_pro.json"
 streams = {}
 for i in range(1, 10):
     sid = f"stream_{i}"
-    streams[sid] = {"source": "", "logo": "", "active": False, "process": None}
+    streams[sid] = {"source": "", "logo": "", "active": False, "process": None, "status_msg_id": None}
 
 if os.path.exists(STREAMS_FILE):
     try:
@@ -40,13 +41,40 @@ def save_streams():
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RplayStreamer")
 
-# ========== خادم HLS ثابت ==========
+# ========== متابعة المشاهدين ==========
+viewers = defaultdict(set)          # {stream_id: set(ip)}
+viewer_last_seen = defaultdict(dict)  # {stream_id: {ip: timestamp}}
+
+async def track_viewer(request, stream_name):
+    """تسجيل مشاهد عند طلب playlist أو segment"""
+    ip = request.remote
+    now = time.time()
+    if stream_name in viewers:
+        viewers[stream_name].add(ip)
+        viewer_last_seen[stream_name][ip] = now
+    else:
+        viewers[stream_name] = {ip}
+        viewer_last_seen[stream_name] = {ip: now}
+
+def clean_viewers():
+    """حذف المشاهدين الذين لم يطلبوا شيئاً خلال 10 ثوانٍ"""
+    now = time.time()
+    for sid in list(viewers.keys()):
+        for ip in list(viewers[sid]):
+            if now - viewer_last_seen[sid].get(ip, 0) > 10:
+                viewers[sid].discard(ip)
+
+# ========== خادم HLS ==========
 async def handle_hls(request):
     name = request.match_info["name"]
     file = request.match_info.get("file", "index.m3u8")
     path = os.path.join(HLS_DIR, name, file)
     if not os.path.exists(path):
         return web.Response(status=404)
+
+    # تسجيل هذا المشاهد
+    await track_viewer(request, name)
+
     with open(path, "rb") as f:
         body = f.read()
     return web.Response(body=body)
@@ -209,15 +237,69 @@ async def start_stream(sid, bot):
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL
+            stderr=asyncio.subprocess.PIPE      # مهم لقراءة fps
         )
         s["process"] = proc
         s["active"] = True
+        start_time = time.time()
         save_streams()
-        url = f"{BASE_URL}:{HTTP_PORT}/live/{sid}/index.m3u8"
-        await bot.send_message(ADMIN_ID, f"✅ بدأ البث {sid}\n🔗 {url}")
 
-        # انتظار العملية
+        # إرسال رسالة الحالة الأولية
+        msg = await bot.send_message(ADMIN_ID, f"🟢 بدأ البث {sid}\n⏳ جاري التحميل...")
+        s["status_msg_id"] = msg.message_id
+
+        # تحديث الإحصائيات بشكل دوري
+        last_update = time.time()
+        last_fps = "?"
+        last_time_str = "00:00:00"
+
+        while proc.returncode is None:
+            # قراءة stderr لاستخراج fps
+            line = await proc.stderr.readline()
+            if line:
+                decoded = line.decode("utf-8", errors="ignore").strip()
+                if "fps=" in decoded:
+                    fps_match = re.search(r"fps=\s*([\d.]+)", decoded)
+                    if fps_match:
+                        last_fps = fps_match.group(1)
+                    time_match = re.search(r"time=(\d+:\d+:\d+\.\d+)", decoded)
+                    if time_match:
+                        last_time_str = time_match.group(1)
+
+            # تحديث واجهة المستخدم كل 5 ثوانٍ
+            now = time.time()
+            if now - last_update >= 5:
+                last_update = now
+                clean_viewers()
+                uptime_seconds = int(now - start_time)
+                hours = uptime_seconds // 3600
+                minutes = (uptime_seconds % 3600) // 60
+                seconds = uptime_seconds % 60
+                uptime_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                viewer_count = len(viewers.get(sid, set()))
+
+                text = (
+                    f"🟢 **{sid} يعمل**\n"
+                    f"📊 FPS: {last_fps}\n"
+                    f"⏱ الوقت: {last_time_str}\n"
+                    f"🕒 مدة البث: {uptime_str}\n"
+                    f"👥 المشاهدين: {viewer_count}"
+                )
+                try:
+                    await bot.edit_message_text(
+                        chat_id=ADMIN_ID,
+                        message_id=msg.message_id,
+                        text=text,
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{sid}")]
+                        ])
+                    )
+                except:
+                    pass
+
+            await asyncio.sleep(0.1)
+
+        # انتهى البث
         await proc.wait()
     except Exception as e:
         logger.error(f"Failed to start stream {sid}: {e}")
@@ -226,7 +308,17 @@ async def start_stream(sid, bot):
         s["active"] = False
         s["process"] = None
         save_streams()
-        await bot.send_message(ADMIN_ID, f"⏹ توقف البث {sid}")
+        # تحديث الرسالة الأخيرة
+        if s.get("status_msg_id"):
+            try:
+                await bot.edit_message_text(
+                    chat_id=ADMIN_ID,
+                    message_id=s["status_msg_id"],
+                    text=f"⏹ توقف البث {sid}"
+                )
+            except:
+                pass
+            s["status_msg_id"] = None
 
 async def stop_stream(sid, bot):
     s = streams[sid]
@@ -249,5 +341,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay Streamer Pro started")
+    logger.info("Rplay Streamer Pro with stats started")
     app.run_polling()
