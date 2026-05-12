@@ -14,7 +14,7 @@ HLS_DIR = "/tmp/hls"
 os.makedirs(HLS_DIR, exist_ok=True)
 
 HTTP_PORT = 8080
-BASE_URL = "http://164.68.102.28"   # غيّره إلى عنوان VPS الصحيح
+BASE_URL = "http://164.68.102.28"
 
 STREAMS_FILE = "streams_pro.json"
 streams = {}
@@ -23,7 +23,8 @@ for i in range(1, 10):
     streams[sid] = {
         "source": "", "logo": "", "user_agent": "", "active": False,
         "process": None, "fallback": False, "status_msg_id": None,
-        "source_online": False, "viewers": set()
+        "source_online": False, "viewers": set(), "last_fps": "?",
+        "start_time": 0, "uptime": "00:00:00"
     }
 
 if os.path.exists(STREAMS_FILE):
@@ -46,7 +47,7 @@ def save_streams():
         json.dump(data, f, indent=2)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("RplayStable")
+logger = logging.getLogger("RplayUI")
 
 # ========== متابعة المشاهدين ==========
 viewer_last_seen = defaultdict(dict)
@@ -116,7 +117,7 @@ def get_system_status():
     except: pass
     return f"🖥 CPU: {cpu:.1f}% | RAM: {ram}"
 
-# ========== دوال البوت ==========
+# ========== دوال البوت (UI محسّن) ==========
 async def check_admin(update):
     if update.effective_user.id != ADMIN_ID:
         if update.message: await update.message.reply_text("🚫 غير مصرح")
@@ -127,61 +128,121 @@ async def check_admin(update):
 def main_menu():
     kb = []
     for i in range(1, 10):
-        kb.append([InlineKeyboardButton(f"🎬 Stream {i}", callback_data=f"menu_stream_{i}")])
+        kb.append([InlineKeyboardButton(f"🎬 Stream {i}", callback_data=f"panel_{i}")])
     kb.append([InlineKeyboardButton("🖥 حالة السيرفر", callback_data="status")])
     return InlineKeyboardMarkup(kb)
 
-def control_menu(sid):
-    s = streams[sid]
+def stream_panel_keyboard(sid, s):
+    """لوحة التحكم الكاملة لبث واحد (تظهر كل المعلومات)"""
+    num = sid.split("_")[1]
     kb = []
+    
+    # صف الحالة
     if s["active"]:
-        kb.append([InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{sid}")])
+        status_icon = "🟢" if s["source_online"] else "🔴"
+        kb.append([InlineKeyboardButton(f"{status_icon} {sid} - يعمل", callback_data="noop")])
     else:
-        kb.append([InlineKeyboardButton("▶️ تشغيل", callback_data=f"start_{sid}")])
-    kb.append([InlineKeyboardButton("📥 المصدر", callback_data=f"source_{sid}")])
-    kb.append([InlineKeyboardButton("🖼 الشعار", callback_data=f"logo_{sid}")])
-    kb.append([InlineKeyboardButton("🕵️ User-Agent", callback_data=f"ua_{sid}")])
-    kb.append([InlineKeyboardButton("ℹ️ حالة البث", callback_data=f"info_{sid}")])
-    kb.append([InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")])
+        kb.append([InlineKeyboardButton(f"⏹ {sid} - متوقف", callback_data="noop")])
+
+    # أزرار التحكم الرئيسية
+    if s["active"]:
+        kb.append([
+            InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{sid}"),
+            InlineKeyboardButton("🔄 تحديث المصدر", callback_data=f"source_{sid}")
+        ])
+    else:
+        kb.append([
+            InlineKeyboardButton("▶️ تشغيل", callback_data=f"start_{sid}"),
+            InlineKeyboardButton("📥 إعداد المصدر", callback_data=f"source_{sid}")
+        ])
+
+    # أزرار الإعدادات
+    kb.append([
+        InlineKeyboardButton("🖼 شعار", callback_data=f"logo_{sid}"),
+        InlineKeyboardButton("🕵️ UA", callback_data=f"ua_{sid}")
+    ])
+    
+    # معلومات سريعة (إن وجدت)
+    if s["active"]:
+        info_text = f"👥 {len(s['viewers'])}"
+        if s["source_online"]:
+            info_text += f" | FPS: {s['last_fps']}"
+        kb.append([InlineKeyboardButton(info_text, callback_data=f"info_{sid}")])
+
+    # زر العودة
+    kb.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")])
     return InlineKeyboardMarkup(kb)
 
 async def start(update, context):
     if not await check_admin(update): return
-    await update.message.reply_text("🖥 **Rplay Stable**", reply_markup=main_menu())
+    await update.message.reply_text("🖥 **Rplay Streamer Pro**", reply_markup=main_menu())
 
 async def button_handler(update, context):
     q = update.callback_query
     await q.answer()
     d = q.data
     if not await check_admin(update): return
+
     if d == "status":
         await q.edit_message_text(get_system_status(), reply_markup=main_menu())
     elif d == "main_menu":
-        await q.edit_message_text("🖥 **Rplay Stable**", reply_markup=main_menu())
+        await q.edit_message_text("🖥 **Rplay Streamer Pro**", reply_markup=main_menu())
+    elif d.startswith("panel_"):
+        num = d.split("_")[1]
+        sid = f"stream_{num}"
+        s = streams[sid]
+        await q.edit_message_text(
+            f"🎛️ **Stream {num}**\n"
+            f"📥 المصدر: {s['source'] or 'غير محدد'}\n"
+            f"🖼 الشعار: {'موجود' if s['logo'] else 'لا يوجد'}\n"
+            f"🕵️ UA: {s['user_agent'] or 'افتراضي'}\n"
+            f"🔗 الرابط: {BASE_URL}:{HTTP_PORT}/live/{sid}/index.m3u8",
+            reply_markup=stream_panel_keyboard(sid, s)
+        )
     elif "_" in d:
         act, sid = d.split("_", 1)
-        if act == "menu":
-            await q.edit_message_text(f"🎛 {sid}", reply_markup=control_menu(sid))
-        elif act == "start":
-            if not streams[sid]["source"]:
-                await q.edit_message_text("❌ عيّن المصدر أولاً")
+        s = streams[sid]
+        
+        if act == "start":
+            if not s["source"]:
+                await q.answer("❌ عيّن المصدر أولاً", show_alert=True)
                 return
             asyncio.create_task(start_stream(sid, context.bot))
-            await q.edit_message_text(f"⏳ جاري تشغيل {sid}...")
+            await q.answer("⏳ جاري التشغيل...")
         elif act == "stop":
             await stop_stream(sid, context.bot)
-            await q.edit_message_text(f"⏹ تم إيقاف {sid}")
+            await q.answer("⏹ تم الإيقاف")
         elif act == "source":
             context.user_data["mode"] = f"source_{sid}"
-            await q.edit_message_text(f"📥 أرسل رابط المصدر لـ {sid}:")
+            await q.edit_message_text(f"📥 أرسل رابط المصدر لـ Stream {sid.split('_')[1]}:")
+            return
         elif act == "logo":
             context.user_data["mode"] = f"logo_{sid}"
-            await q.edit_message_text(f"🖼 أرسل رابط الشعار لـ {sid} (أو /skip)")
+            await q.edit_message_text(f"🖼 أرسل رابط الشعار لـ Stream {sid.split('_')[1]} (أو /skip):")
+            return
         elif act == "ua":
             context.user_data["mode"] = f"ua_{sid}"
-            await q.edit_message_text(f"🕵️ أرسل User-Agent لـ {sid} (أو /skip)")
+            await q.edit_message_text(f"🕵️ أرسل User-Agent لـ Stream {sid.split('_')[1]} (أو /skip):")
+            return
         elif act == "info":
-            await update_status(sid, context.bot)
+            text = (
+                f"📊 **{sid}**\n"
+                f"FPS: {s['last_fps']}\n"
+                f"👥 المشاهدين: {len(s['viewers'])}\n"
+                f"⏱ المدة: {s['uptime']}\n"
+                f"{'🟢 المصدر شغال' if s['source_online'] else '🔴 المصدر طافي'}"
+            )
+            await q.answer(text, show_alert=True)
+
+        # تحديث اللوحة بعد أي إجراء
+        await q.edit_message_text(
+            f"🎛️ **Stream {sid.split('_')[1]}**\n"
+            f"📥 المصدر: {s['source'] or 'غير محدد'}\n"
+            f"🖼 الشعار: {'موجود' if s['logo'] else 'لا يوجد'}\n"
+            f"🕵️ UA: {s['user_agent'] or 'افتراضي'}\n"
+            f"🔗 الرابط: {BASE_URL}:{HTTP_PORT}/live/{sid}/index.m3u8",
+            reply_markup=stream_panel_keyboard(sid, s)
+        )
 
 async def msg_handler(update, context):
     if not await check_admin(update): return
@@ -190,42 +251,33 @@ async def msg_handler(update, context):
     if mode and "_" in mode:
         act, sid = mode.split("_", 1)
         context.user_data["mode"] = None
+        s = streams[sid]
         if act == "source":
-            streams[sid]["source"] = text
+            s["source"] = text
             save_streams()
             await update.message.reply_text(f"✅ تم حفظ المصدر لـ {sid}")
         elif act == "logo":
             if text.lower() != "/skip":
-                streams[sid]["logo"] = text
+                s["logo"] = text
                 save_streams()
                 await update.message.reply_text("✅ تم تحديث الشعار")
             else:
                 await update.message.reply_text("✅ تم تخطي الشعار")
         elif act == "ua":
-            streams[sid]["user_agent"] = "" if text.lower() == "/skip" else text
+            s["user_agent"] = "" if text.lower() == "/skip" else text
             save_streams()
             await update.message.reply_text(f"✅ تم تحديث User-Agent لـ {sid}")
-
-async def update_status(sid, bot):
-    s = streams[sid]
-    online = "🟢 المصدر شغال" if s["source_online"] else "🔴 المصدر طافي"
-    viewers = len(s["viewers"])
-    text = f"📡 **{sid}**\n{online}\n👥 المشاهدين: {viewers}"
-    try:
-        await bot.edit_message_text(chat_id=ADMIN_ID, message_id=s["status_msg_id"], text=text)
-    except: pass
 
 async def start_stream(sid, bot):
     s = streams[sid]
     src = s["source"]
     logo = s.get("logo", "")
-    user_agent = s.get("user_agent", "ExoPlayerLib/2.18.5")   # <-- افتراضي قوي
+    user_agent = s.get("user_agent", "ExoPlayerLib/2.18.5")
 
     out_dir = os.path.join(HLS_DIR, sid)
     os.makedirs(out_dir, exist_ok=True)
     out_playlist = os.path.join(out_dir, "index.m3u8")
 
-    # أمر ffmpeg الأساسي (نفسه بالضبط ولكن مع user‑agent)
     base_cmd = [
         "ffmpeg",
         "-re",
@@ -265,7 +317,6 @@ async def start_stream(sid, bot):
         out_playlist
     ]
 
-    # بث احتياطي (شاشة سوداء + شعار)
     fallback_cmd = [
         "ffmpeg", "-re",
         "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=30",
@@ -278,72 +329,48 @@ async def start_stream(sid, bot):
     ]
 
     s["active"] = True
+    s["start_time"] = time.time()
     save_streams()
-    msg = await bot.send_message(ADMIN_ID, f"🟢 بدأ البث {sid}")
-    s["status_msg_id"] = msg.message_id
 
-    retries = 3  # عدد المحاولات قبل الانتقال للاحتياطي
-
+    retries = 3
     while s["active"]:
         proc = await asyncio.create_subprocess_exec(*base_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
         s["process"] = proc
         s["fallback"] = False
         s["source_online"] = True
 
-        last_fps = "?"
         async def read_stderr():
-            nonlocal last_fps
             while True:
                 line = await proc.stderr.readline()
                 if not line: break
                 decoded = line.decode(errors="ignore").strip()
                 if "fps=" in decoded:
                     m = re.search(r"fps=\s*([\d.]+)", decoded)
-                    if m: last_fps = m.group(1)
+                    if m: s["last_fps"] = m.group(1)
 
         reader = asyncio.create_task(read_stderr())
-        start_time = time.time()
 
         while proc.returncode is None:
             clean_viewers()
-            await asyncio.sleep(10)
-            viewers = len(s["viewers"])
-            uptime = int(time.time() - start_time)
-            text = (
-                f"🟢 **{sid} يعمل**\n"
-                f"📊 FPS: {last_fps}\n"
-                f"🕒 المدة: {uptime//3600:02}:{(uptime%3600)//60:02}:{uptime%60:02}\n"
-                f"👥 المشاهدين: {viewers}"
-            )
-            try:
-                await bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg.message_id, text=text)
-            except: pass
+            s["uptime"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
+            await asyncio.sleep(5)
 
         await proc.wait()
         s["source_online"] = False
 
-        # حفظ الخطأ
-        with open("ffmpeg_errors.log", "a") as f:
-            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {sid} exit code {proc.returncode}\n")
-
         retries -= 1
         if retries > 0:
-            await bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg.message_id,
-                                        text=f"⚠️ {sid} فشل المصدر - إعادة المحاولة {3-retries}/3...")
             await asyncio.sleep(2)
-            continue  # يحاول مجددًا
+            continue
 
-        # استنفدت المحاولات ← شاشة سوداء
         if s["active"]:
             fallback_proc = await asyncio.create_subprocess_exec(*fallback_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
             s["process"] = fallback_proc
             s["fallback"] = True
-            await bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg.message_id, text=f"🖤 {sid} شاشة سوداء")
-            # يبقى على الشاشة السوداء لمدة 20 ثانية ثم يكسر الحلقة ليبدأ من جديد
             await asyncio.sleep(20)
             fallback_proc.kill()
             await fallback_proc.wait()
-            retries = 3   # إعادة تعيين العداد للمحاولات القادمة
+            retries = 3
         else:
             break
 
@@ -351,7 +378,6 @@ async def start_stream(sid, bot):
         s["process"].kill()
     s["active"] = False
     save_streams()
-    await bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg.message_id, text=f"⏹ توقف {sid}")
 
 async def stop_stream(sid, bot):
     s = streams[sid]
@@ -360,7 +386,7 @@ async def stop_stream(sid, bot):
         try:
             s["process"].kill()
         except: pass
-    await bot.send_message(ADMIN_ID, f"⏹ تم إيقاف {sid}")
+    save_streams()
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
@@ -371,5 +397,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay Stable – ready with auto user‑agent")
+    logger.info("Rplay UI Enhanced Ready")
     app.run_polling()
