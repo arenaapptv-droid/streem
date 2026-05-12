@@ -49,8 +49,9 @@ def save_streams():
         json.dump(data, f, indent=2)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("RplayLivePanel")
+logger = logging.getLogger("RplayFinal")
 
+# ========== متابعة المشاهدين ==========
 viewer_last_seen = defaultdict(dict)
 
 async def track_viewer(request, stream_name):
@@ -74,6 +75,7 @@ def clean_viewers():
                 if ip in viewer_last_seen[sid]:
                     del viewer_last_seen[sid][ip]
 
+# ========== خادم HLS ==========
 async def handle_hls(request):
     name = request.match_info["name"]
     file = request.match_info.get("file", "index.m3u8")
@@ -96,6 +98,7 @@ async def start_http_server():
     await site.start()
     logger.info(f"HTTP server on port {HTTP_PORT}")
 
+# ========== حالة السيرفر ==========
 def get_system_status():
     cpu = 0.0
     try:
@@ -121,6 +124,42 @@ def get_system_status():
     except: pass
     return f"🖥 CPU: {cpu:.1f}% | RAM: {ram}"
 
+# ========== دوال المراقبة الحية ==========
+monitor_tasks = {}  # {chat_id: asyncio.Task}
+
+async def start_monitor_live(query, chat_id, message_id):
+    """تبدأ مهمة تحديث رسالة المراقبة كل 5 ثوانٍ"""
+    # نوقف أي مهمة سابقة لنفس الدردشة
+    if chat_id in monitor_tasks:
+        monitor_tasks[chat_id].cancel()
+    async def update_loop():
+        try:
+            while True:
+                status = get_system_status()
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⏹ إيقاف المراقبة", callback_data="stop_monitor")],
+                    [InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")]
+                ])
+                try:
+                    await query.edit_message_text(status, reply_markup=kb)
+                except:
+                    pass
+                await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            pass
+    task = asyncio.create_task(update_loop())
+    monitor_tasks[chat_id] = task
+
+async def stop_monitor(chat_id, query):
+    """إيقاف مهمة المراقبة وإعادة عرض القائمة الرئيسية"""
+    if chat_id in monitor_tasks:
+        monitor_tasks[chat_id].cancel()
+        del monitor_tasks[chat_id]
+    # عرض حالة ثابتة مع القائمة الرئيسية
+    status = get_system_status()
+    await query.edit_message_text(status, reply_markup=main_menu())
+
+# ========== دوال البوت ==========
 async def check_admin(update):
     if update.effective_user.id != ADMIN_ID:
         if update.message: await update.message.reply_text("🚫 غير مصرح")
@@ -135,7 +174,7 @@ def main_menu():
         status = "🟢" if s.get("active") else "⏹"
         kb.append([InlineKeyboardButton(f"{status} {name}", callback_data=f"panel_{sid}")])
     kb.append([InlineKeyboardButton("➕ إضافة بث", callback_data="add_stream")])
-    kb.append([InlineKeyboardButton("🖥 حالة السيرفر", callback_data="status")])
+    kb.append([InlineKeyboardButton("🖥 مراقبة السيرفر", callback_data="monitor")])
     return InlineKeyboardMarkup(kb)
 
 def stream_panel_keyboard(sid, s):
@@ -172,10 +211,17 @@ async def button_handler(update, context):
     await q.answer()
     d = q.data
     if not await check_admin(update): return
+    chat_id = q.message.chat_id
 
-    if d == "status":
-        await q.edit_message_text(get_system_status(), reply_markup=main_menu())
-    elif d == "main_menu":
+    # --- أزرار المراقبة ---
+    if d == "monitor":
+        await start_monitor_live(q, chat_id, q.message.message_id)
+        return
+    if d == "stop_monitor":
+        await stop_monitor(chat_id, q)
+        return
+
+    if d == "main_menu":
         await q.edit_message_text("🖥 **Rplay Dynamic**", reply_markup=main_menu())
     elif d == "add_stream":
         context.user_data["mode"] = "add_stream"
@@ -186,7 +232,6 @@ async def button_handler(update, context):
         if not s:
             await q.edit_message_text("❌ البث غير موجود", reply_markup=main_menu())
             return
-        # حفظ معرف الرسالة لتحديثها تلقائياً لاحقاً
         s["panel_msg_id"] = q.message.message_id
         s["panel_chat_id"] = q.message.chat_id
         name = s.get("name", sid)
@@ -294,7 +339,6 @@ async def msg_handler(update, context):
             await update.message.reply_text(f"✅ تم تغيير الاسم من {old} إلى {text}")
 
 async def update_panel_message(sid, bot):
-    """تحديث رسالة لوحة التحكم الخاصة بالبث (إن كانت موجودة)"""
     s = streams.get(sid)
     if not s or not s.get("panel_msg_id") or not s.get("panel_chat_id"):
         return
@@ -304,7 +348,6 @@ async def update_panel_message(sid, bot):
         viewers = len(s.get("viewers", set()))
         uptime = s.get('uptime', '00:00:00')
         info = f"{source_status} FPS:{s.get('last_fps','?')} | ⏱️{uptime} | 👥{viewers}"
-        # نعيد بناء نص الرسالة بالكامل
         text = (
             f"🎛️ **{name}**\n"
             f"📥 المصدر: {s['source'] or 'غير محدد'}\n"
@@ -403,7 +446,6 @@ async def start_stream(sid, bot):
 
         reader = asyncio.create_task(read_stderr())
 
-        # حلقة التحديث التلقائي للوحة
         while proc.returncode is None:
             clean_viewers()
             s["uptime"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
@@ -412,7 +454,7 @@ async def start_stream(sid, bot):
 
         await proc.wait()
         s["source_online"] = False
-        await update_panel_message(sid, bot)  # تحديث فوري عند التوقف
+        await update_panel_message(sid, bot)
 
         retries -= 1
         if retries > 0:
@@ -436,7 +478,7 @@ async def start_stream(sid, bot):
         s["process"].kill()
     s["active"] = False
     save_streams()
-    await update_panel_message(sid, bot)  # التحديث الأخير
+    await update_panel_message(sid, bot)
 
 async def stop_stream(sid, bot):
     s = streams[sid]
@@ -457,5 +499,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay Live Panel Ready")
+    logger.info("Rplay Live Panel + Monitor Ready")
     app.run_polling()
