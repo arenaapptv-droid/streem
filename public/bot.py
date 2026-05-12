@@ -14,7 +14,7 @@ HLS_DIR = "/tmp/hls"
 os.makedirs(HLS_DIR, exist_ok=True)
 
 HTTP_PORT = 8080
-BASE_URL = "http://164.68.102.28"
+BASE_URL = "http://164.68.102.28"   # غيّره إلى عنوان VPS الصحيح
 
 STREAMS_FILE = "streams_pro.json"
 streams = {}
@@ -46,7 +46,7 @@ def save_streams():
         json.dump(data, f, indent=2)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("RplayFHD")
+logger = logging.getLogger("RplayStable")
 
 # ========== متابعة المشاهدين ==========
 viewer_last_seen = defaultdict(dict)
@@ -147,7 +147,7 @@ def control_menu(sid):
 
 async def start(update, context):
     if not await check_admin(update): return
-    await update.message.reply_text("🖥 **Rplay FHD Stable**", reply_markup=main_menu())
+    await update.message.reply_text("🖥 **Rplay Stable**", reply_markup=main_menu())
 
 async def button_handler(update, context):
     q = update.callback_query
@@ -157,7 +157,7 @@ async def button_handler(update, context):
     if d == "status":
         await q.edit_message_text(get_system_status(), reply_markup=main_menu())
     elif d == "main_menu":
-        await q.edit_message_text("🖥 **Rplay FHD Stable**", reply_markup=main_menu())
+        await q.edit_message_text("🖥 **Rplay Stable**", reply_markup=main_menu())
     elif "_" in d:
         act, sid = d.split("_", 1)
         if act == "menu":
@@ -219,14 +219,17 @@ async def start_stream(sid, bot):
     s = streams[sid]
     src = s["source"]
     logo = s.get("logo", "")
+    user_agent = s.get("user_agent", "ExoPlayerLib/2.18.5")   # <-- افتراضي قوي
+
     out_dir = os.path.join(HLS_DIR, sid)
     os.makedirs(out_dir, exist_ok=True)
     out_playlist = os.path.join(out_dir, "index.m3u8")
 
-    # أمر FFmpeg الأساسي (مع فلتر FHD تكيفي)
+    # أمر ffmpeg الأساسي (نفسه بالضبط ولكن مع user‑agent)
     base_cmd = [
         "ffmpeg",
         "-re",
+        "-user_agent", user_agent,
         "-reconnect", "1",
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "5",
@@ -234,24 +237,30 @@ async def start_stream(sid, bot):
         "-fflags", "+genpts+discardcorrupt",
         "-i", src
     ]
+
     if logo:
         base_cmd += [
             "-i", logo,
             "-filter_complex",
-            "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease[base]; "
-            "[1:v][base]scale2ref=iw:ih[logo];[base][logo]overlay=0:0"
-        ]
-    else:
-        base_cmd += [
-            "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease"
+            "[1:v][0:v] scale2ref=iw:ih [logo][ref]; [ref][logo] overlay=0:0"
         ]
 
     base_cmd += [
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-        "-maxrate", "9000k", "-bufsize", "18000k",
-        "-vsync", "cfr", "-r", "30",
-        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-        "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "23",
+        "-b:v", "9000k",
+        "-maxrate", "9000k",
+        "-bufsize", "18000k",
+        "-vsync", "cfr",
+        "-r", "30",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-ar", "44100",
+        "-ac", "2",
+        "-f", "hls",
+        "-hls_time", "2",
+        "-hls_list_size", "5",
         "-hls_flags", "delete_segments",
         out_playlist
     ]
@@ -273,6 +282,8 @@ async def start_stream(sid, bot):
     msg = await bot.send_message(ADMIN_ID, f"🟢 بدأ البث {sid}")
     s["status_msg_id"] = msg.message_id
 
+    retries = 3  # عدد المحاولات قبل الانتقال للاحتياطي
+
     while s["active"]:
         proc = await asyncio.create_subprocess_exec(*base_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
         s["process"] = proc
@@ -293,11 +304,9 @@ async def start_stream(sid, bot):
         reader = asyncio.create_task(read_stderr())
         start_time = time.time()
 
-        # مراقبة البث الأصلي
         while proc.returncode is None:
             clean_viewers()
             await asyncio.sleep(10)
-            # تحديث رسالة الحالة
             viewers = len(s["viewers"])
             uptime = int(time.time() - start_time)
             text = (
@@ -313,20 +322,31 @@ async def start_stream(sid, bot):
         await proc.wait()
         s["source_online"] = False
 
-        # تشغيل الشاشة السوداء فوراً
+        # حفظ الخطأ
+        with open("ffmpeg_errors.log", "a") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {sid} exit code {proc.returncode}\n")
+
+        retries -= 1
+        if retries > 0:
+            await bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg.message_id,
+                                        text=f"⚠️ {sid} فشل المصدر - إعادة المحاولة {3-retries}/3...")
+            await asyncio.sleep(2)
+            continue  # يحاول مجددًا
+
+        # استنفدت المحاولات ← شاشة سوداء
         if s["active"]:
             fallback_proc = await asyncio.create_subprocess_exec(*fallback_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
             s["process"] = fallback_proc
             s["fallback"] = True
             await bot.edit_message_text(chat_id=ADMIN_ID, message_id=msg.message_id, text=f"🖤 {sid} شاشة سوداء")
-            # انتظار 10 ثوانٍ ثم المحاولة مرة أخرى
-            await asyncio.sleep(10)
+            # يبقى على الشاشة السوداء لمدة 20 ثانية ثم يكسر الحلقة ليبدأ من جديد
+            await asyncio.sleep(20)
             fallback_proc.kill()
             await fallback_proc.wait()
+            retries = 3   # إعادة تعيين العداد للمحاولات القادمة
         else:
             break
 
-    # تنظيف
     if s.get("process"):
         s["process"].kill()
     s["active"] = False
@@ -351,5 +371,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay FHD Stable Ready")
+    logger.info("Rplay Stable – ready with auto user‑agent")
     app.run_polling()
