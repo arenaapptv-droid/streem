@@ -20,18 +20,33 @@ STREAMS_FILE = "streams_pro.json"
 streams = {}   # فارغ تماماً في البداية
 
 if os.path.exists(STREAMS_FILE):
-    with open(STREAMS_FILE) as f:
-        streams = json.load(f)
-        for s in streams.values():
-            s.setdefault("user_agent", "")
-            s.setdefault("viewers", [])   # نعيد تهيئته كقائمة (سيصبح set لاحقاً)
+    try:
+        with open(STREAMS_FILE) as f:
+            loaded = json.load(f)
+            for sid, s_data in loaded.items():
+                # تحويل viewers من قائمة إلى مجموعة عند التحميل
+                if "viewers" in s_data and isinstance(s_data["viewers"], list):
+                    s_data["viewers"] = set(s_data["viewers"])
+                streams[sid] = s_data
+    except (json.JSONDecodeError, KeyError):
+        logger.error("Failed to parse streams_pro.json, starting fresh.")
+        streams = {}
 
 def save_streams():
+    data = {}
+    for sid, s in streams.items():
+        s_copy = s.copy()
+        # تحويل viewers من مجموعة إلى قائمة عند الحفظ
+        if "viewers" in s_copy and isinstance(s_copy["viewers"], set):
+            s_copy["viewers"] = list(s_copy["viewers"])
+        # إزالة العملية الحية (process) لأنها لا تُحفظ
+        s_copy.pop("process", None)
+        data[sid] = s_copy
     with open(STREAMS_FILE, "w") as f:
-        json.dump(streams, f, indent=2)
+        json.dump(data, f, indent=2)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("RplayFinal")
+logger = logging.getLogger("RplayJSONFix")
 
 # ========== متابعة المشاهدين ==========
 viewer_last_seen = defaultdict(dict)
@@ -403,5 +418,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay Final Dynamic - with uptime")
+    logger.info("Rplay Final - JSON Fix")
     app.run_polling()
