@@ -1,8 +1,8 @@
-import asyncio, re, time, json, os, subprocess
+import asyncio, time, json, os, subprocess
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# ========== الإعدادات ==========
+# ========== تحميل الإعدادات ==========
 with open("settings.json", "r") as f:
     settings = json.load(f)
     TOKEN = settings["TOKEN"]
@@ -32,6 +32,7 @@ def save_streams_config(cfg):
 
 streams_cfg = load_streams_config()
 
+# ========== دوال حالة السيرفر ==========
 def get_cpu_usage():
     try:
         with open("/proc/stat", "r") as f:
@@ -113,13 +114,23 @@ def control_menu(stream_id):
 async def stop_stream(stream_id, bot, manual=False):
     global manual_stop_flags
     if stream_id in active_streams:
-        if manual:
-            manual_stop_flags[stream_id] = True  # تثبيت العلامة
+        if manual: manual_stop_flags[stream_id] = True
         s = active_streams[stream_id]
         try: s["process"].kill()
         except: pass
-        # لا نقوم بمسح العلامة هنا، بل ننتظر حتى تلتقطها run_stream
-    # لا نلغي المهمة هنا، لأن المهمة نفسها هي التي ستلتقط العلامة
+        try: await s["process"].wait()
+        except: pass
+        try:
+            if s.get("frame_msg_id"):
+                await bot.edit_message_text(chat_id=ADMIN_ID, message_id=s["frame_msg_id"], text=f"⏹ Stream {stream_id.split('_')[1]} متوقف")
+        except: pass
+        del active_streams[stream_id]
+        manual_stop_flags.pop(stream_id, None)
+    if stream_id in stream_tasks:
+        stream_tasks[stream_id].cancel()
+        try: await stream_tasks[stream_id]
+        except asyncio.CancelledError: pass
+        del stream_tasks[stream_id]
 
 async def server_monitor(query, chat_id, msg_id):
     try:
@@ -136,7 +147,7 @@ async def server_monitor(query, chat_id, msg_id):
 
 async def start(update, context):
     if not await check_admin(update): return
-    await update.message.reply_text("🖥️ **Rplay Server – 9 Streams**", reply_markup=main_menu())
+    await update.message.reply_text("🖥️ **Rplay Server – 9 Streams (GStreamer)**", reply_markup=main_menu())
 
 async def handle_message(update, context):
     if not await check_admin(update): return
@@ -178,61 +189,50 @@ async def run_stream(stream_id, context, is_slate=False):
     stream_num = stream_id.split("_")[1]
     name = f"Stream {stream_num}"
 
+    # --- بناء أمر GStreamer ---
     if is_slate:
-        cmd = ["ffmpeg", "-stream_loop", "-1", "-re", "-i", SLATE_IMAGE_URL,
-               "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-               "-c:v", "libx264", "-preset", "superfast", "-tune", "stillimage",
-               "-crf", "30", "-b:v", "500k", "-maxrate", "500k", "-bufsize", "1000k",
-               "-c:a", "aac", "-b:a", "32k", "-ar", "44100", "-ac", "2",
-               "-threads", "6", "-f", "flv", output_url]
+        # شاشة توقف بصورة ثابتة + صوت صامت (باستخدام GStreamer)
+        pipeline = (
+            f"multifilesrc location={SLATE_IMAGE_URL} loop=true caps=image/png ! decodebin ! videoconvert ! "
+            f"x264enc tune=stillimage bitrate=500 speed-preset=superfast ! h264parse ! "
+            f"flvmux name=mux ! rtmpsink location=\"{output_url}\" "
+            f"audiotestsrc wave=silence ! audioconvert ! voaacenc bitrate=32000 ! mux."
+        )
     else:
-        cmd = ["ffmpeg", "-re", "-timeout", "5000000",
-               "-i", input_url,
-               "-c:v", "copy",
-               "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-               "-flvflags", "no_duration_filesize", "-rtmp_live", "live",
-               "-f", "flv", output_url]
+        # نسخ الفيديو (copy) + ترميز الصوت إلى AAC
+        pipeline = (
+            f"uridecodebin uri={input_url} name=src "
+            f"src. ! queue ! h264parse ! flvmux name=mux "
+            f"src. ! queue ! audioconvert ! voaacenc bitrate=128000 ! mux. "
+            f"mux. ! rtmpsink location=\"{output_url}\""
+        )
 
-    msg = await context.bot.send_message(ADMIN_ID, f"⏳ جاري تشغيل {name}...")
+    cmd = ["gst-launch-1.0", "-e"] + pipeline.split()
+
+    msg = await context.bot.send_message(ADMIN_ID, f"⏳ جاري تشغيل {name} (GStreamer)...")
     mid = msg.message_id
 
     fail = 0
     while fail < 10 and not manual_stop_flags.get(stream_id):
         try:
-            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE
+            )
         except Exception as e:
-            await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid, text=f"❌ فشل تشغيل {name}")
-            break
+            await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid, text=f"❌ فشل تشغيل {name}: {e}")
+            return
 
-        # فحص سريع للفشل
-        err = ""
-        try:
-            while True:
-                line = await asyncio.wait_for(proc.stderr.readline(), 5)
-                if not line: break
-                err = line.decode("utf-8", errors="ignore").strip()
-        except asyncio.TimeoutError: pass
-        await asyncio.sleep(1)
-
+        # انتظار قصير لالتقاط الفشل
+        await asyncio.sleep(3)
         if proc.returncode is not None:
-            # إذا كان الإيقاف يدويًا أثناء الفحص، اخرج فورًا
-            if manual_stop_flags.get(stream_id):
-                break
-            if "404" in err:
-                txt = f"❌ المصدر غير موجود (404). تأكد من الرابط.\nالمصدر: {input_url}"
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 تغيير المصدر", callback_data=f"change_{stream_id}")],
-                    [InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")]
-                ])
-                await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid, text=txt, reply_markup=kb)
-                break
-            else:
-                fail += 1
-                delay = min(10 * fail, 60)
-                await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid,
-                    text=f"❌ فشل (كود {proc.returncode}). {err}\nالمحاولة {fail}/10 خلال {delay}s...")
-                await asyncio.sleep(delay)
-                continue
+            fail += 1
+            delay = min(10 * fail, 60)
+            await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid,
+                text=f"❌ فشل (كود {proc.returncode})\nالمحاولة {fail}/10 خلال {delay}s...")
+            await asyncio.sleep(delay)
+            continue
 
         # الأزرار
         if is_slate:
@@ -243,7 +243,7 @@ async def run_stream(stream_id, context, is_slate=False):
             btns = InlineKeyboardMarkup([[InlineKeyboardButton("🟡 شاشة توقف", callback_data=f"slate_{stream_id}"),
                                         InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{stream_id}"),
                                         InlineKeyboardButton("🔄 تغيير المصدر", callback_data=f"change_{stream_id}")]])
-            status = f"🟢 {name} يعمل"
+            status = f"🟢 {name} يعمل (GStreamer)"
 
         try: await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid, text=status, reply_markup=btns)
         except: pass
@@ -253,32 +253,27 @@ async def run_stream(stream_id, context, is_slate=False):
         last_upd = time.time()
         try:
             while proc.returncode is None and not manual_stop_flags.get(stream_id):
+                # GStreamer يكتب الحالة على stderr، نلتقطها لعرض "يعمل"
                 try:
                     line = await asyncio.wait_for(proc.stderr.readline(), 2)
                 except asyncio.TimeoutError:
                     line = b""
                 if line:
                     dec = line.decode("utf-8", errors="ignore").strip()
-                    if "fps=" in dec:
+                    # لو وجدنا أي شيء، نعتبره لا يزال حياً
+                    if dec and "fps=" not in dec:
                         now = time.time()
                         if now - last_upd >= 5:
                             last_upd = now
-                            fps_m = re.search(r"fps=\s*([\d.]+)", dec)
-                            time_m = re.search(r"time=(\d+:\d+:\d+\.\d+)", dec)
-                            speed_m = re.search(r"speed=\s*([\d.]+)x", dec)
-                            fps = fps_m.group(1) if fps_m else "0"
-                            t = time_m.group(1) if time_m else "00:00:00"
-                            sp = speed_m.group(1) if speed_m else "0"
-                            txt = f"🟢 {name} يعمل\n📊 فريمات : {fps}\n⏰ الوقت : {t}\n🚀 سرعة الرفع : {sp}x"
                             try:
-                                await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid, text=txt, reply_markup=btns)
+                                await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid,
+                                    text=f"🟢 {name} يعمل\n(GStreamer)", reply_markup=btns)
                             except: pass
                 await asyncio.sleep(0.1)
 
-            # بعد الخروج من الحلقة الداخلية
             if manual_stop_flags.get(stream_id):
                 await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid, text=f"⏹ {name} تم الإيقاف يدوياً")
-                break  # يكسر الحلقة الخارجية مباشرة
+                break
 
             retcode = await proc.wait()
             fail += 1
@@ -297,7 +292,6 @@ async def run_stream(stream_id, context, is_slate=False):
                 try: proc.kill(); await proc.wait()
                 except: pass
 
-    # تنظيف نهائي
     if stream_id in active_streams: del active_streams[stream_id]
     manual_stop_flags.pop(stream_id, None)
     pending_source.pop(stream_id, None)
@@ -314,7 +308,7 @@ async def button_handler(update, context):
         context.user_data["status_task"] = asyncio.create_task(server_monitor(q, q.message.chat_id, q.message.message_id))
         return
     if d == "main_menu":
-        await q.edit_message_text("🖥️ **Rplay Server – 9 Streams**", reply_markup=main_menu())
+        await q.edit_message_text("🖥️ **Rplay Server – 9 Streams (GStreamer)**", reply_markup=main_menu())
         return
 
     if "_" in d:
@@ -330,10 +324,8 @@ async def button_handler(update, context):
             context.user_data["mode"] = f"source_{sid}"
             await q.edit_message_text(f"📥 أرسل رابط المصدر لـ Stream {num}:")
         elif act == "stop":
-            # إيقاف يدوي
             if sid in active_streams:
                 await stop_stream(sid, context.bot, manual=True)
-                # سيتم عرض رسالة الإيقاف في run_stream نفسها
             else:
                 await q.edit_message_text(f"❌ Stream {num} لا يعمل")
         elif act == "change":
@@ -341,9 +333,7 @@ async def button_handler(update, context):
             await q.edit_message_text(f"📥 أرسل رابط المصدر الجديد لـ Stream {num}:")
         elif act == "slate":
             if sid in active_streams:
-                # لا نوقف البث يدوياً، سنوقف ثم نبدأ شاشة التوقف
                 await stop_stream(sid, context.bot, manual=True)
-                # انتظر قليلاً ثم ابدأ شاشة التوقف
                 await asyncio.sleep(1)
                 await q.edit_message_text(f"🟡 جاري شاشة التوقف لـ Stream {num}...")
                 stream_tasks[sid] = asyncio.create_task(run_stream(sid, context, is_slate=True))
@@ -353,7 +343,6 @@ async def button_handler(update, context):
             if sid in active_streams:
                 await stop_stream(sid, context.bot, manual=True)
                 await asyncio.sleep(1)
-                await q.edit_message_text(f"🔙 جاري استئناف Stream {num}...")
                 context.user_data["mode"] = f"source_{sid}"
                 await q.edit_message_text(f"📥 أرسل رابط المصدر لـ Stream {num}:")
             else:
@@ -384,5 +373,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ 9 Streams Copy Ready")
+    print("✅ 9 Streams GStreamer Ready")
     app.run_polling()
