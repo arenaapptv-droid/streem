@@ -114,23 +114,13 @@ def control_menu(stream_id):
 async def stop_stream(stream_id, bot, manual=False):
     global manual_stop_flags
     if stream_id in active_streams:
-        if manual: manual_stop_flags[stream_id] = True
+        if manual:
+            manual_stop_flags[stream_id] = True  # تعيين العلامة فوراً
         s = active_streams[stream_id]
-        try: s["process"].kill()
-        except: pass
-        try: await s["process"].wait()
-        except: pass
         try:
-            if s.get("frame_msg_id"):
-                await bot.edit_message_text(chat_id=ADMIN_ID, message_id=s["frame_msg_id"], text=f"⏹ Stream {stream_id.split('_')[1]} متوقف")
+            s["process"].kill()
         except: pass
-        del active_streams[stream_id]
-        manual_stop_flags.pop(stream_id, None)
-    if stream_id in stream_tasks:
-        stream_tasks[stream_id].cancel()
-        try: await stream_tasks[stream_id]
-        except asyncio.CancelledError: pass
-        del stream_tasks[stream_id]
+        # لا ننظف هنا، سننتظر run_stream لتلتقط العلامة
 
 async def server_monitor(query, chat_id, msg_id):
     try:
@@ -147,7 +137,7 @@ async def server_monitor(query, chat_id, msg_id):
 
 async def start(update, context):
     if not await check_admin(update): return
-    await update.message.reply_text("🖥️ **Rplay Server – 9 Streams (GStreamer)**", reply_markup=main_menu())
+    await update.message.reply_text("🖥️ **Rplay Server – 9 Streams (GStreamer + ExoPlayer UA)**", reply_markup=main_menu())
 
 async def handle_message(update, context):
     if not await check_admin(update): return
@@ -189,9 +179,8 @@ async def run_stream(stream_id, context, is_slate=False):
     stream_num = stream_id.split("_")[1]
     name = f"Stream {stream_num}"
 
-    # --- بناء أمر GStreamer ---
+    # --- بناء أمر GStreamer مع وكيل مستخدم ExoPlayer ---
     if is_slate:
-        # شاشة توقف بصورة ثابتة + صوت صامت (باستخدام GStreamer)
         pipeline = (
             f"multifilesrc location={SLATE_IMAGE_URL} loop=true caps=image/png ! decodebin ! videoconvert ! "
             f"x264enc tune=stillimage bitrate=500 speed-preset=superfast ! h264parse ! "
@@ -199,12 +188,16 @@ async def run_stream(stream_id, context, is_slate=False):
             f"audiotestsrc wave=silence ! audioconvert ! voaacenc bitrate=32000 ! mux."
         )
     else:
-        # نسخ الفيديو (copy) + ترميز الصوت إلى AAC
         pipeline = (
             f"uridecodebin uri={input_url} name=src "
             f"src. ! queue ! h264parse ! flvmux name=mux "
             f"src. ! queue ! audioconvert ! voaacenc bitrate=128000 ! mux. "
             f"mux. ! rtmpsink location=\"{output_url}\""
+        )
+        # إضافة وكيل المستخدم ExoPlayer
+        pipeline = pipeline.replace(
+            "uridecodebin",
+            "uridecodebin user-agent=\"ExoPlayerLib/2.16.1 (Linux;Android 13) ExoPlayerLib/2.16.1\""
         )
 
     cmd = ["gst-launch-1.0", "-e"] + pipeline.split()
@@ -227,6 +220,8 @@ async def run_stream(stream_id, context, is_slate=False):
         # انتظار قصير لالتقاط الفشل
         await asyncio.sleep(3)
         if proc.returncode is not None:
+            if manual_stop_flags.get(stream_id):
+                break  # خروج فوري
             fail += 1
             delay = min(10 * fail, 60)
             await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=mid,
@@ -253,14 +248,12 @@ async def run_stream(stream_id, context, is_slate=False):
         last_upd = time.time()
         try:
             while proc.returncode is None and not manual_stop_flags.get(stream_id):
-                # GStreamer يكتب الحالة على stderr، نلتقطها لعرض "يعمل"
                 try:
                     line = await asyncio.wait_for(proc.stderr.readline(), 2)
                 except asyncio.TimeoutError:
                     line = b""
                 if line:
                     dec = line.decode("utf-8", errors="ignore").strip()
-                    # لو وجدنا أي شيء، نعتبره لا يزال حياً
                     if dec and "fps=" not in dec:
                         now = time.time()
                         if now - last_upd >= 5:
@@ -292,6 +285,7 @@ async def run_stream(stream_id, context, is_slate=False):
                 try: proc.kill(); await proc.wait()
                 except: pass
 
+    # تنظيف
     if stream_id in active_streams: del active_streams[stream_id]
     manual_stop_flags.pop(stream_id, None)
     pending_source.pop(stream_id, None)
@@ -308,7 +302,7 @@ async def button_handler(update, context):
         context.user_data["status_task"] = asyncio.create_task(server_monitor(q, q.message.chat_id, q.message.message_id))
         return
     if d == "main_menu":
-        await q.edit_message_text("🖥️ **Rplay Server – 9 Streams (GStreamer)**", reply_markup=main_menu())
+        await q.edit_message_text("🖥️ **Rplay Server – 9 Streams (GStreamer + ExoPlayer UA)**", reply_markup=main_menu())
         return
 
     if "_" in d:
@@ -373,5 +367,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ 9 Streams GStreamer Ready")
+    print("✅ 9 Streams GStreamer + ExoPlayer UA Ready")
     app.run_polling()
