@@ -17,13 +17,14 @@ HTTP_PORT = 8080
 BASE_URL = "http://164.68.102.28"   # غيّره إلى عنوان VPS الصحيح
 
 STREAMS_FILE = "streams_pro.json"
-streams = {}   # {stream_id: {"name": "", "source": "", "logo": "", "user_agent": "", "active": False, ...}}
+streams = {}   # فارغ تماماً في البداية
 
 if os.path.exists(STREAMS_FILE):
     with open(STREAMS_FILE) as f:
         streams = json.load(f)
         for s in streams.values():
-            s.setdefault("user_agent", "")   # تأكيد وجود المفتاح
+            s.setdefault("user_agent", "")
+            s.setdefault("viewers", [])   # نعيد تهيئته كقائمة (سيصبح set لاحقاً)
 
 def save_streams():
     with open(STREAMS_FILE, "w") as f:
@@ -39,14 +40,18 @@ async def track_viewer(request, stream_name):
     ip = request.remote
     now = time.time()
     if stream_name in streams:
-        streams[stream_name].setdefault("viewers", set())
-        streams[stream_name]["viewers"].add(ip)
+        s = streams[stream_name]
+        if not isinstance(s.get("viewers"), set):
+            s["viewers"] = set()
+        s["viewers"].add(ip)
         viewer_last_seen[stream_name][ip] = now
 
 def clean_viewers():
     now = time.time()
     for sid, s in streams.items():
-        for ip in list(s.get("viewers", set())):
+        if not isinstance(s.get("viewers"), set):
+            s["viewers"] = set()
+        for ip in list(s["viewers"]):
             if now - viewer_last_seen[sid].get(ip, 0) > 10:
                 s["viewers"].discard(ip)
                 if ip in viewer_last_seen[sid]:
@@ -137,7 +142,8 @@ def stream_panel_keyboard(sid, s):
     kb.append([InlineKeyboardButton("🗑 حذف", callback_data=f"delete_{sid}")])
     if s.get("active"):
         viewers = len(s.get("viewers", set()))
-        info = f"FPS: {s.get('last_fps','?')} | 👥 {viewers}"
+        uptime = s.get('uptime', '00:00:00')
+        info = f"FPS: {s.get('last_fps','?')} | ⏱️ {uptime} | 👥 {viewers}"
         kb.append([InlineKeyboardButton(info, callback_data="noop")])
     kb.append([InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")])
     return InlineKeyboardMarkup(kb)
@@ -231,12 +237,12 @@ async def msg_handler(update, context):
 
     if mode == "add_stream":
         context.user_data["mode"] = None
-        # توليد ID جديد بناءً على الوقت
         sid = f"stream_{int(time.time())}"
         streams[sid] = {
             "name": text, "source": "", "logo": "", "user_agent": "",
             "active": False, "process": None, "fallback": False,
-            "source_online": False, "viewers": set(), "last_fps": "?"
+            "source_online": False, "viewers": set(), "last_fps": "?",
+            "uptime": "00:00:00"
         }
         save_streams()
         await update.message.reply_text(f"✅ تم إضافة البث **{text}**\nاستخدم الأزرار لإعداده.", reply_markup=main_menu())
@@ -278,7 +284,6 @@ async def start_stream(sid, bot):
     os.makedirs(out_dir, exist_ok=True)
     out_playlist = os.path.join(out_dir, "index.m3u8")
 
-    # --- أمر FFmpeg المحسن (أداء منخفض) ---
     base_cmd = [
         "ffmpeg",
         "-re",
@@ -299,14 +304,14 @@ async def start_stream(sid, bot):
 
     base_cmd += [
         "-c:v", "libx264",
-        "-preset", "superfast",       # مفتاح توفير CPU
+        "-preset", "superfast",
         "-crf", "23",
-        "-b:v", "4000k",              # بت ريت أقل
+        "-b:v", "4000k",
         "-maxrate", "4000k",
         "-bufsize", "8000k",
         "-vsync", "cfr",
         "-r", "30",
-        "-threads", "3",              # توزيع أفضل للحمل
+        "-threads", "3",
         "-c:a", "aac",
         "-b:a", "128k",
         "-ar", "44100",
@@ -318,7 +323,6 @@ async def start_stream(sid, bot):
         out_playlist
     ]
 
-    # بث احتياطي (شاشة سوداء + شعار)
     fallback_cmd = [
         "ffmpeg", "-re",
         "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=30",
@@ -399,5 +403,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay Final Dynamic - Low CPU")
+    logger.info("Rplay Final Dynamic - with uptime")
     app.run_polling()
