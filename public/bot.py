@@ -1,4 +1,4 @@
-import asyncio, time, json, os, logging, re
+import asyncio, time, json, os, logging, re, shutil
 from collections import defaultdict
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -32,6 +32,7 @@ if os.path.exists(STREAMS_FILE):
                 s_data.setdefault("start_time", 0)
                 s_data.setdefault("panel_msg_id", None)
                 s_data.setdefault("panel_chat_id", None)
+                s_data.setdefault("mode", "transcode")   # وضع افتراضي
                 streams[sid] = s_data
     except (json.JSONDecodeError, KeyError):
         logger.error("Failed to parse streams_pro.json, starting fresh.")
@@ -51,7 +52,6 @@ def save_streams():
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RplayFinal")
 
-# ========== متابعة المشاهدين ==========
 viewer_last_seen = defaultdict(dict)
 
 async def track_viewer(request, stream_name):
@@ -75,7 +75,6 @@ def clean_viewers():
                 if ip in viewer_last_seen[sid]:
                     del viewer_last_seen[sid][ip]
 
-# ========== خادم HLS ==========
 async def handle_hls(request):
     name = request.match_info["name"]
     file = request.match_info.get("file", "index.m3u8")
@@ -98,7 +97,6 @@ async def start_http_server():
     await site.start()
     logger.info(f"HTTP server on port {HTTP_PORT}")
 
-# ========== حالة السيرفر ==========
 def get_system_status():
     cpu = 0.0
     try:
@@ -124,12 +122,9 @@ def get_system_status():
     except: pass
     return f"🖥 CPU: {cpu:.1f}% | RAM: {ram}"
 
-# ========== دوال المراقبة الحية ==========
-monitor_tasks = {}  # {chat_id: asyncio.Task}
+monitor_tasks = {}
 
 async def start_monitor_live(query, chat_id, message_id):
-    """تبدأ مهمة تحديث رسالة المراقبة كل 5 ثوانٍ"""
-    # نوقف أي مهمة سابقة لنفس الدردشة
     if chat_id in monitor_tasks:
         monitor_tasks[chat_id].cancel()
     async def update_loop():
@@ -151,15 +146,12 @@ async def start_monitor_live(query, chat_id, message_id):
     monitor_tasks[chat_id] = task
 
 async def stop_monitor(chat_id, query):
-    """إيقاف مهمة المراقبة وإعادة عرض القائمة الرئيسية"""
     if chat_id in monitor_tasks:
         monitor_tasks[chat_id].cancel()
         del monitor_tasks[chat_id]
-    # عرض حالة ثابتة مع القائمة الرئيسية
     status = get_system_status()
     await query.edit_message_text(status, reply_markup=main_menu())
 
-# ========== دوال البوت ==========
 async def check_admin(update):
     if update.effective_user.id != ADMIN_ID:
         if update.message: await update.message.reply_text("🚫 غير مصرح")
@@ -179,6 +171,7 @@ def main_menu():
 
 def stream_panel_keyboard(sid, s):
     name = s.get("name", sid)
+    mode = s.get("mode", "transcode")
     kb = []
     if s.get("active"):
         kb.append([InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{sid}")])
@@ -192,12 +185,21 @@ def stream_panel_keyboard(sid, s):
         InlineKeyboardButton("🕵️ UA", callback_data=f"ua_{sid}"),
         InlineKeyboardButton("✏️ إعادة تسمية", callback_data=f"rename_{sid}")
     ])
+    # زر تبديل الوضع
+    if mode == "transcode":
+        toggle_text = "🔄 نسخ مباشر"
+        toggle_data = f"togglemode_{sid}"
+    else:
+        toggle_text = "⚙️ ترميز"
+        toggle_data = f"togglemode_{sid}"
+    kb.append([InlineKeyboardButton(toggle_text, callback_data=toggle_data)])
     kb.append([InlineKeyboardButton("🗑 حذف", callback_data=f"delete_{sid}")])
     if s.get("active"):
         source_status = "🟢" if s.get("source_online") else "🔴"
         viewers = len(s.get("viewers", set()))
         uptime = s.get('uptime', '00:00:00')
-        info = f"{source_status} FPS:{s.get('last_fps','?')} | ⏱️{uptime} | 👥{viewers}"
+        mode_label = "نسخ" if mode == "copy" else "ترميز"
+        info = f"{source_status} FPS:{s.get('last_fps','?')} | ⏱️{uptime} | 👥{viewers} | {mode_label}"
         kb.append([InlineKeyboardButton(info, callback_data="noop")])
     kb.append([InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")])
     return InlineKeyboardMarkup(kb)
@@ -213,7 +215,6 @@ async def button_handler(update, context):
     if not await check_admin(update): return
     chat_id = q.message.chat_id
 
-    # --- أزرار المراقبة ---
     if d == "monitor":
         await start_monitor_live(q, chat_id, q.message.message_id)
         return
@@ -259,7 +260,7 @@ async def button_handler(update, context):
             await q.answer("⏳ جاري التشغيل...")
         elif act == "stop":
             await stop_stream(sid, context.bot)
-            await q.answer("⏹ تم الإيقاف")
+            await q.answer("⏹ تم الإيقاف والتنظيف")
         elif act == "source":
             context.user_data["mode"] = f"source_{sid}"
             await q.edit_message_text(f"📥 أرسل رابط المصدر لـ {name}:")
@@ -280,9 +281,33 @@ async def button_handler(update, context):
             await stop_stream(sid, context.bot)
             del streams[sid]
             save_streams()
-            await q.edit_message_text(f"🗑 تم حذف {name}", reply_markup=main_menu())
+            await q.edit_message_text(f"🗑 تم حذف {name} بالكامل", reply_markup=main_menu())
+            return
+        elif act == "togglemode":
+            # تبديل الوضع
+            old_mode = s.get("mode", "transcode")
+            new_mode = "copy" if old_mode == "transcode" else "transcode"
+            s["mode"] = new_mode
+            save_streams()
+            # إذا كان البث قيد التشغيل، أعد تشغيله بالوضع الجديد
+            if s.get("active"):
+                await stop_stream(sid, context.bot)
+                asyncio.create_task(start_stream(sid, context.bot))
+                await q.answer(f"⏳ جاري التشغيل بوضع {'نسخ' if new_mode == 'copy' else 'ترميز'}...")
+            else:
+                await q.answer(f"✅ تم التبديل إلى وضع {'نسخ' if new_mode == 'copy' else 'ترميز'}")
+            # تحديث اللوحة
+            await q.edit_message_text(
+                f"🎛️ **{name}**\n"
+                f"📥 المصدر: {s['source'] or 'غير محدد'}\n"
+                f"🖼 الشعار: {'موجود' if s['logo'] else 'لا يوجد'}\n"
+                f"🕵️ UA: {s['user_agent'] or 'افتراضي'}\n"
+                f"🔗 الرابط: {BASE_URL}:{HTTP_PORT}/live/{sid}/index.m3u8",
+                reply_markup=stream_panel_keyboard(sid, s)
+            )
             return
 
+        # تحديث اللوحة بعد أي إجراء
         await q.edit_message_text(
             f"🎛️ **{name}**\n"
             f"📥 المصدر: {s['source'] or 'غير محدد'}\n"
@@ -306,7 +331,8 @@ async def msg_handler(update, context):
             "active": False, "process": None, "fallback": False,
             "source_online": False, "viewers": set(), "last_fps": "?",
             "uptime": "00:00:00", "start_time": 0,
-            "panel_msg_id": None, "panel_chat_id": None
+            "panel_msg_id": None, "panel_chat_id": None,
+            "mode": "transcode"
         }
         save_streams()
         await update.message.reply_text(f"✅ تم إضافة البث **{text}**\nاستخدم الأزرار لإعداده.", reply_markup=main_menu())
@@ -347,7 +373,8 @@ async def update_panel_message(sid, bot):
         source_status = "🟢" if s.get("source_online") else "🔴"
         viewers = len(s.get("viewers", set()))
         uptime = s.get('uptime', '00:00:00')
-        info = f"{source_status} FPS:{s.get('last_fps','?')} | ⏱️{uptime} | 👥{viewers}"
+        mode_label = "نسخ" if s.get("mode") == "copy" else "ترميز"
+        info = f"{source_status} FPS:{s.get('last_fps','?')} | ⏱️{uptime} | 👥{viewers} | {mode_label}"
         text = (
             f"🎛️ **{name}**\n"
             f"📥 المصدر: {s['source'] or 'غير محدد'}\n"
@@ -369,60 +396,86 @@ async def start_stream(sid, bot):
     src = s["source"]
     logo = s.get("logo", "")
     user_agent = s.get("user_agent", "ExoPlayerLib/2.18.5")
+    mode = s.get("mode", "transcode")
 
     out_dir = os.path.join(HLS_DIR, sid)
     os.makedirs(out_dir, exist_ok=True)
     out_playlist = os.path.join(out_dir, "index.m3u8")
 
-    base_cmd = [
-        "ffmpeg",
-        "-re",
-        "-user_agent", user_agent,
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
-        "-rw_timeout", "10000000",
-        "-fflags", "+genpts+discardcorrupt",
-        "-i", src
-    ]
-    if logo:
+    if mode == "copy":
+        # وضع النسخ المباشر (بدون ترميز، بدون شعار)
+        base_cmd = [
+            "ffmpeg",
+            "-re",
+            "-user_agent", user_agent,
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+            "-rw_timeout", "10000000",
+            "-fflags", "+genpts+discardcorrupt",
+            "-i", src,
+            "-c:v", "copy",
+            "-c:a", "copy",
+            "-f", "hls",
+            "-hls_time", "2",
+            "-hls_list_size", "5",
+            "-hls_flags", "delete_segments",
+            out_playlist
+        ]
+    else:
+        # وضع الترميز (الشعار مدعوم)
+        base_cmd = [
+            "ffmpeg",
+            "-re",
+            "-user_agent", user_agent,
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+            "-rw_timeout", "10000000",
+            "-fflags", "+genpts+discardcorrupt",
+            "-i", src
+        ]
+        if logo:
+            base_cmd += [
+                "-i", logo,
+                "-filter_complex",
+                "[1:v][0:v] scale2ref=iw:ih [logo][ref]; [ref][logo] overlay=0:0"
+            ]
+
         base_cmd += [
-            "-i", logo,
-            "-filter_complex",
-            "[1:v][0:v] scale2ref=iw:ih [logo][ref]; [ref][logo] overlay=0:0"
+            "-c:v", "libx264",
+            "-preset", "superfast",
+            "-crf", "23",
+            "-b:v", "4000k",
+            "-maxrate", "4000k",
+            "-bufsize", "8000k",
+            "-vsync", "cfr",
+            "-r", "30",
+            "-threads", "3",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-ar", "44100",
+            "-ac", "2",
+            "-f", "hls",
+            "-hls_time", "2",
+            "-hls_list_size", "5",
+            "-hls_flags", "delete_segments",
+            out_playlist
         ]
 
-    base_cmd += [
-        "-c:v", "libx264",
-        "-preset", "superfast",
-        "-crf", "23",
-        "-b:v", "4000k",
-        "-maxrate", "4000k",
-        "-bufsize", "8000k",
-        "-vsync", "cfr",
-        "-r", "30",
-        "-threads", "3",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-ar", "44100",
-        "-ac", "2",
-        "-f", "hls",
-        "-hls_time", "2",
-        "-hls_list_size", "5",
-        "-hls_flags", "delete_segments",
-        out_playlist
-    ]
-
-    fallback_cmd = [
-        "ffmpeg", "-re",
-        "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=30",
-        "-i", logo if logo else "color=c=black:s=1920x1080:r=30",
-        "-filter_complex", "[0:v][1:v]overlay=0:0" if logo else "null",
-        "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
-        "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
-        "-hls_flags", "delete_segments",
-        out_playlist
-    ]
+    fallback_cmd = None
+    if mode == "transcode":
+        # الشاشة السوداء فقط لوضع الترميز
+        fallback_cmd = [
+            "ffmpeg", "-re",
+            "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=30",
+            "-i", logo if logo else "color=c=black:s=1920x1080:r=30",
+            "-filter_complex", "[0:v][1:v]overlay=0:0" if logo else "null",
+            "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
+            "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+            "-hls_flags", "delete_segments",
+            out_playlist
+        ]
 
     s["active"] = True
     s["start_time"] = time.time()
@@ -461,7 +514,7 @@ async def start_stream(sid, bot):
             await asyncio.sleep(2)
             continue
 
-        if s["active"]:
+        if s["active"] and fallback_cmd:
             fallback_proc = await asyncio.create_subprocess_exec(*fallback_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
             s["process"] = fallback_proc
             s["fallback"] = True
@@ -481,14 +534,37 @@ async def start_stream(sid, bot):
     await update_panel_message(sid, bot)
 
 async def stop_stream(sid, bot):
-    s = streams[sid]
-    s["active"] = False
+    s = streams.get(sid)
+    if not s:
+        return
+    logger.info(f"Stopping stream {sid} - cleaning up resources")
     if s.get("process"):
         try:
             s["process"].kill()
-        except: pass
+            await s["process"].wait()
+        except Exception as e:
+            logger.error(f"Error killing process: {e}")
+        s["process"] = None
+    s["active"] = False
+    s["source_online"] = False
+    s["fallback"] = False
+    stream_hls_dir = os.path.join(HLS_DIR, sid)
+    if os.path.exists(stream_hls_dir):
+        try:
+            shutil.rmtree(stream_hls_dir)
+            logger.info(f"Removed HLS directory: {stream_hls_dir}")
+        except Exception as e:
+            logger.error(f"Error removing HLS directory: {e}")
+    if isinstance(s.get("viewers"), set):
+        s["viewers"].clear()
+    else:
+        s["viewers"] = set()
+    s["last_fps"] = "?"
+    s["uptime"] = "00:00:00"
+    s["start_time"] = 0
     save_streams()
     await update_panel_message(sid, bot)
+    logger.info(f"Stream {sid} fully cleaned up")
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
@@ -499,5 +575,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay Live Panel + Monitor Ready")
+    logger.info("Rplay Dual Mode Ready")
     app.run_polling()
