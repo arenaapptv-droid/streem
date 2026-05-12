@@ -1,4 +1,4 @@
-import asyncio, re, time, json, os, logging
+import asyncio, time, json, os
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -9,42 +9,71 @@ with open("settings.json", "r") as f:
     TOKEN = settings["TOKEN"]
     ADMIN_ID = settings["ADMIN_ID"]
 
-HLS_PORT = 8080               # المنفذ الذي سيستمع عليه خادم HLS
-BASE_URL = "http://164.68.102.28"  # عنوان سيرفرك (غيّره حسب عنوان VPS)
+HLS_PORT = 8080
+BASE_URL = "http://164.68.102.28"  # غيّره إلى عنوان VPS الحقيقي
 
 STREAMS_FILE = "streams_hls.json"
-streams = {}                  # {stream_id: {"source": str, "active": bool}}
-
-def load_streams():
-    if os.path.exists(STREAMS_FILE):
-        try:
-            with open(STREAMS_FILE) as f:
-                return json.load(f)
-        except: pass
-    return {f"stream_{i}": {"source": "", "active": False} for i in range(1, 10)}
+streams = {f"stream_{i}": {"source": "", "active": False} for i in range(1, 10)}
+if os.path.exists(STREAMS_FILE):
+    with open(STREAMS_FILE) as f:
+        streams = json.load(f)
 
 def save_streams():
     with open(STREAMS_FILE, "w") as f:
         json.dump(streams, f, indent=2)
 
-streams = load_streams()
+# ========== حالة السيرفر ==========
+def get_system_status():
+    cpu = 0.0
+    try:
+        with open("/proc/stat", "r") as st:
+            line = st.readline().split()
+            if line[0] == "cpu":
+                idle1 = int(line[4])
+                total1 = sum(map(int, line[1:5]))
+        time.sleep(0.1)
+        with open("/proc/stat", "r") as st:
+            line = st.readline().split()
+            if line[0] == "cpu":
+                idle2 = int(line[4])
+                total2 = sum(map(int, line[1:5]))
+        delta_total = total2 - total1
+        delta_idle = idle2 - idle1
+        if delta_total > 0:
+            cpu = 100.0 * (1.0 - delta_idle / delta_total)
+    except:
+        pass
+
+    try:
+        with open("/proc/meminfo", "r") as mem:
+            lines = mem.readlines()
+            total = int(lines[0].split()[1]) // 1024
+            avail = int([l for l in lines if "MemAvailable" in l][0].split()[1]) // 1024
+            used = total - avail
+            ram = f"{used} / {total} MiB"
+    except:
+        ram = "N/A"
+
+    return f"🖥 CPU: {cpu:.1f}% | RAM: {ram}"
 
 # ========== وكيل HLS ==========
 async def proxy_hls(request):
-    """يعيد توجيه طلبات HLS إلى المصدر الأصلي"""
-    stream_name = request.match_info.get("name")
-    stream_id = f"stream_{stream_name.split('_')[1]}" if "_" in stream_name else None
-
-    if not stream_id or not streams.get(stream_id, {}).get("active"):
-        return web.Response(text="Stream not active", status=404)
+    name = request.match_info.get("name")
+    stream_id = None
+    for sid, s in streams.items():
+        if s.get("active") and f"stream_{name.split('_')[-1]}" == sid:
+            stream_id = sid
+            break
+    if not stream_id:
+        return web.Response(status=404)
 
     source_url = streams[stream_id]["source"]
     path = request.match_info.get("path", "")
-    target_url = source_url.rsplit("/", 1)[0] + "/" + path if path else source_url
+    target = source_url.rsplit("/", 1)[0] + "/" + path if path else source_url
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(target_url, timeout=10) as resp:
+            async with session.get(target, timeout=10) as resp:
                 body = await resp.read()
                 return web.Response(body=body, content_type=resp.content_type)
     except:
@@ -58,15 +87,13 @@ async def start_hls_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", HLS_PORT)
     await site.start()
-    print(f"✅ HLS Proxy running on port {HLS_PORT}")
+    print(f"✅ HLS Proxy on port {HLS_PORT}")
 
-# ========== متحكم البوت ==========
-async def check_admin(update: Update) -> bool:
+# ========== دوال تيليجرام ==========
+async def check_admin(update):
     if update.effective_user.id != ADMIN_ID:
-        if update.message:
-            await update.message.reply_text("🚫 غير مصرح")
-        elif update.callback_query:
-            await update.callback_query.answer("🚫 غير مصرح", show_alert=True)
+        if update.message: await update.message.reply_text("🚫 غير مصرح")
+        elif update.callback_query: await update.callback_query.answer("🚫 غير مصرح", show_alert=True)
         return False
     return True
 
@@ -99,9 +126,13 @@ async def button_handler(update, context):
     if not await check_admin(update): return
 
     if d == "status":
-        # عرض حالة السيرفر
-        cpu = 0.0  # يمكنك إضافة قراءة حقيقية
-        await q.edit_message_text(f"🖥 CPU: {cpu}%", reply_markup=main_menu())
+        status_text = get_system_status()
+        current_text = q.message.text
+        current_markup = q.message.reply_markup
+        # تجنب التعديل إذا كانت الرسالة نفسها
+        if current_text == status_text and current_markup == main_menu():
+            return
+        await q.edit_message_text(status_text, reply_markup=main_menu())
     elif d == "main_menu":
         await q.edit_message_text("🖥 **Rplay HLS Proxy**", reply_markup=main_menu())
 
@@ -115,7 +146,7 @@ async def button_handler(update, context):
                 return
             streams[sid]["active"] = True
             save_streams()
-            url = f"{BASE_URL}:{HLS_PORT}/live/{sid}.m3u8"
+            url = f"{BASE_URL}:{HLS_PORT}/live/{sid.replace('_', '')}.m3u8"
             await q.edit_message_text(f"✅ بدأ البث\n🔗 {url}", reply_markup=control_menu(sid))
         elif act == "stop":
             streams[sid]["active"] = False
@@ -141,11 +172,10 @@ async def msg_handler(update, context):
         await update.message.reply_text(f"✅ تم حفظ المصدر لـ {sid}. يمكنك تشغيله الآن.")
 
 if __name__ == "__main__":
-    # تشغيل خادم HLS في الخلفية
-    loop = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     loop.create_task(start_hls_server())
 
-    # تشغيل البوت
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
