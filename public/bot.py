@@ -14,7 +14,7 @@ HLS_DIR = "/tmp/hls"
 os.makedirs(HLS_DIR, exist_ok=True)
 
 HTTP_PORT = 8080
-BASE_URL = "http://164.68.102.28"   # غيّره إلى عنوان VPS الصحيح
+BASE_URL = "http://164.68.102.28"
 
 STREAMS_FILE = "streams_pro.json"
 streams = {}   # فارغ تماماً في البداية
@@ -24,7 +24,6 @@ if os.path.exists(STREAMS_FILE):
         with open(STREAMS_FILE) as f:
             loaded = json.load(f)
             for sid, s_data in loaded.items():
-                # تحويل viewers من قائمة إلى مجموعة عند التحميل
                 if "viewers" in s_data and isinstance(s_data["viewers"], list):
                     s_data["viewers"] = set(s_data["viewers"])
                 s_data.setdefault("user_agent", "")
@@ -237,7 +236,6 @@ async def button_handler(update, context):
             await q.edit_message_text(f"🗑 تم حذف {name}", reply_markup=main_menu())
             return
 
-        # تحديث اللوحة
         await q.edit_message_text(
             f"🎛️ **{name}**\n"
             f"📥 المصدر: {s['source'] or 'غير محدد'}\n"
@@ -254,7 +252,11 @@ async def msg_handler(update, context):
 
     if mode == "add_stream":
         context.user_data["mode"] = None
-        sid = f"stream_{int(time.time())}"
+        # إنشاء معرف فريد باستخدام الاسم وتاريخ الوقت
+        raw_name = text.replace(' ', '_')
+        sid = f"{raw_name}_{int(time.time())}" if raw_name in streams else raw_name
+        if sid in streams:
+            sid = f"{raw_name}_{int(time.time())}"
         streams[sid] = {
             "name": text, "source": "", "logo": "", "user_agent": "",
             "active": False, "process": None, "fallback": False,
@@ -375,7 +377,8 @@ async def start_stream(sid, bot):
 
         while proc.returncode is None:
             clean_viewers()
-            s["uptime"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
+            # تحديث وقت التشغيل في نفس قاموس البث
+            streams[sid]["uptime"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
             await asyncio.sleep(5)
 
         await proc.wait()
@@ -420,5 +423,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay Final Dynamic - with uptime")
+    logger.info("Rplay Final - Named + Uptime")
     app.run_polling()
