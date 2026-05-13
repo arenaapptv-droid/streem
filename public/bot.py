@@ -51,6 +51,12 @@ viewer_last = defaultdict(dict)
 # لتخزين معرف الرسالة الخاصة بكل بث
 stream_message_ids = {}
 
+# متغيرات المراقبة
+monitor_active = False
+monitor_task = None
+monitor_chat_id = None
+monitor_msg_id = None
+
 if os.path.exists(STREAMS_FILE):
     with open(STREAMS_FILE) as f:
         streams = json.load(f)
@@ -380,9 +386,43 @@ async def stop_stream(sid, bot):
     await update_stream_message(sid, bot)
 
 # =========================================
+# مراقبة السيرفر (تحديث كل 3 ثوانٍ)
+# =========================================
+async def monitor_loop(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id, message_id):
+    global monitor_active
+    while monitor_active:
+        status_text = system_status()
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏹ إيقاف المراقبة", callback_data="stop_monitor")],
+            [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")]
+        ])
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=status_text,
+                reply_markup=kb,
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            print(f"Monitor edit error: {e}")
+        await asyncio.sleep(3)
+    # عند الخروج من الحلقة (تم إيقاف المراقبة)، نرسل حالة ثابتة
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=system_status(),
+            reply_markup=main_kb,
+            parse_mode="Markdown"
+        )
+    except: pass
+
+# =========================================
 # CALLBACK HANDLER
 # =========================================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global monitor_active, monitor_task, monitor_chat_id, monitor_msg_id
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -390,7 +430,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_id = query.message.message_id
 
     if data == "main_menu":
+        if monitor_active:
+            monitor_active = False
+            if monitor_task:
+                monitor_task.cancel()
         await query.edit_message_text("🎬 القائمة الرئيسية", reply_markup=main_kb)
+        return
+
+    if data == "stop_monitor":
+        if monitor_active:
+            monitor_active = False
+            if monitor_task:
+                monitor_task.cancel()
+        await query.edit_message_text(system_status(), reply_markup=main_kb, parse_mode="Markdown")
         return
 
     if data == "list_hls":
@@ -403,7 +455,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("open_"):
         sid = data[5:]
         if sid in streams:
-            # حفظ معرف الرسالة الخاصة بالبث
             streams[sid]["chat_id"] = chat_id
             streams[sid]["message_id"] = message_id
             save_streams()
@@ -512,6 +563,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # TEXT MESSAGE HANDLER
 # =========================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global monitor_active, monitor_task, monitor_chat_id, monitor_msg_id
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("🚫 غير مصرح")
         return
@@ -530,7 +582,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📝 أرسل اسم البث الجديد:")
         return
     if text == "🖥 مراقبة السيرفر":
-        await update.message.reply_text(system_status())
+        # إذا كانت المراقبة نشطة، نوقفها
+        if monitor_active:
+            monitor_active = False
+            if monitor_task:
+                monitor_task.cancel()
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=monitor_chat_id,
+                    message_id=monitor_msg_id,
+                    text=system_status(),
+                    reply_markup=main_kb,
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
+            return
+        # بدء مراقبة جديدة
+        msg = await update.message.reply_text("⏳ جاري تحميل حالة السيرفر...")
+        monitor_chat_id = msg.chat_id
+        monitor_msg_id = msg.message_id
+        monitor_active = True
+        monitor_task = asyncio.create_task(monitor_loop(update, context, monitor_chat_id, monitor_msg_id))
         return
     if text == "🧹 تنظيف الملفات":
         shutil.rmtree(HLS_DIR, ignore_errors=True)
