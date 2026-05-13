@@ -42,7 +42,7 @@ async def hls_handler(request):
         return web.Response(status=404)
     return web.FileResponse(path)
 
-async def run_http_server():
+async def start_http():
     app = web.Application()
     app.router.add_get("/live/{name}/{file:.*}", hls_handler)
     runner = web.AppRunner(app)
@@ -64,13 +64,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    
     text = update.message.text
-    print(f"Received: {text}")
 
     if text == "📺 قائمة HLS":
         if not streams:
-            await update.message.reply_text("لا توجد بثوث HLS حالياً")
+            await update.message.reply_text("لا توجد بثوث HLS")
             return
         msg = "📺 **بثوث HLS**:\n"
         for sid, s in streams.items():
@@ -81,7 +79,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == "📡 قائمة RTMP":
         if not streams:
-            await update.message.reply_text("لا توجد بثوث RTMP حالياً")
+            await update.message.reply_text("لا توجد بثوث RTMP")
             return
         msg = "📡 **بثوث RTMP**:\n"
         for sid, s in streams.items():
@@ -138,11 +136,11 @@ async def run_stream(sid, chat_id, bot):
     s = streams[sid]
     src = s["source"]
     ua = s.get("ua", "ExoPlayerLib/2.18.5")
-    
+
     out_dir = os.path.join(HLS_DIR, sid)
     os.makedirs(out_dir, exist_ok=True)
     out_file = os.path.join(out_dir, "index.m3u8")
-    
+
     cmd = [
         "ffmpeg", "-re",
         "-user_agent", ua,
@@ -156,20 +154,22 @@ async def run_stream(sid, chat_id, bot):
         "-hls_flags", "delete_segments",
         out_file
     ]
-    
+
     s["active"] = True
     save()
-    
+
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
     await proc.wait()
-    
+
     s["active"] = False
     save()
     await bot.send_message(chat_id, f"⏹ توقف البث {s['name']}")
 
 # ========== التشغيل الرئيسي ==========
 async def main():
-    await run_http_server()
+    # تشغيل خادم HTTP في الخلفية
+    asyncio.create_task(start_http())
+    # إنشاء وتشغيل البوت
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
