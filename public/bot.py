@@ -53,7 +53,7 @@ def save_streams():
         json.dump(data, f, indent=2)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("RplayUI")
+logger = logging.getLogger("RplayFinalUI")
 
 viewer_last_seen = defaultdict(dict)
 
@@ -164,7 +164,7 @@ async def check_admin(update):
         return False
     return True
 
-# ---------- لوحة المفاتيح السفلية الدائمة ----------
+# ---------- الكيبورد السفلي الدائم ----------
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("📺 HLS"), KeyboardButton("📡 RTMP")],
@@ -241,6 +241,8 @@ def stream_panel_keyboard(sid, s):
 async def start(update, context):
     if not await check_admin(update): return
     await update.message.reply_text("🖥 **Rplay HLS & RTMP**", reply_markup=main_menu())
+    # إظهار الكيبورد السفلي
+    await update.message.reply_text("اختر من الأزرار السفلية للتنقل السريع:", reply_markup=MAIN_KEYBOARD)
 
 async def button_handler(update, context):
     q = update.callback_query
@@ -387,12 +389,12 @@ async def button_handler(update, context):
             reply_markup=stream_panel_keyboard(sid, s)
         )
 
-# ---------- معالجة النصوص (تحديث تلقائي للوحة) ----------
+# ---------- معالجة النصوص (الكيبورد السفلي + الحفظ التلقائي) ----------
 async def msg_handler(update, context):
     if not await check_admin(update): return
     text = update.message.text.strip()
 
-    # التعامل مع الأزرار السفلية
+    # الكيبورد السفلي
     if text == "📺 HLS":
         await update.message.reply_text("📋 **بثوث HLS**", reply_markup=stream_list("hls"))
         return
@@ -404,9 +406,9 @@ async def msg_handler(update, context):
         await update.message.reply_text("📝 أرسل اسم البث الجديد:")
         return
     elif text == "🖥 مراقبة":
-        # بدء المراقبة الحية
-        chat_id = update.message.chat_id
-        await start_monitor_live(update.callback_query, chat_id, None) if False else None
+        # بدء المراقبة في رسالة جديدة
+        msg = await update.message.reply_text("⏳ جاري تحميل حالة السيرفر...")
+        await start_monitor_live(None, update.message.chat_id, msg.message_id)
         return
 
     mode = context.user_data.get("mode")
@@ -701,5 +703,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(extra_button_handler, pattern="^newtype_"))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay UI Enhanced Final")
+    logger.info("Rplay Final UI Ready")
     app.run_polling()
