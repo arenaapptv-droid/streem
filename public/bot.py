@@ -11,7 +11,7 @@ from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# ========== إعدادات السجل (تقليل الإزعاج) ==========
+# ========== إعدادات السجل ==========
 logging.basicConfig(
     level=logging.WARNING,
     format="%(asctime)s [%(levelname)s] %(message)s"
@@ -152,9 +152,31 @@ def get_system_status():
     return f"🖥 CPU: {cpu:.1f}% | RAM: {ram}"
 
 monitor_tasks = {}
-async def start_monitor_live(query, chat_id, message_id):
+
+async def start_monitor_live(update_or_query, chat_id=None, message_id=None):
+    """
+    يمكن استدعاؤها إما بـ:
+    - start_monitor_live(query, ...)  # من الكول باك
+    - start_monitor_live(update, chat_id, message_id) # من الرسالة
+    """
+    # تحديد chat_id و message_id و bot بناءً على المدخلات
+    if chat_id is None and hasattr(update_or_query, 'message'):
+        # جاءت كـ CallbackQuery
+        q = update_or_query
+        chat_id = q.message.chat_id
+        message_id = q.message.message_id
+        bot = q.bot
+    elif chat_id and message_id and hasattr(update_or_query, 'bot'):
+        # جاءت كـ Update مع تحديد chat_id و message_id
+        bot = update_or_query.bot
+    else:
+        logger.error("Invalid parameters to start_monitor_live")
+        return
+
+    # إلغاء المهمة السابقة إن وجدت
     if chat_id in monitor_tasks:
         monitor_tasks[chat_id].cancel()
+
     async def update_loop():
         try:
             while True:
@@ -164,13 +186,19 @@ async def start_monitor_live(query, chat_id, message_id):
                     [InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")]
                 ])
                 try:
-                    await query.edit_message_text(status, reply_markup=kb)
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=status,
+                        reply_markup=kb
+                    )
                 except Exception as e:
                     if "Message is not modified" not in str(e):
                         logger.error(f"Monitor update error: {e}")
                 await asyncio.sleep(5)
         except asyncio.CancelledError:
             pass
+
     task = asyncio.create_task(update_loop())
     monitor_tasks[chat_id] = task
 
@@ -290,7 +318,7 @@ async def update_panel_message(sid, bot):
     old_state = panel_last_state.get(key)
 
     if old_state and old_state[0] == text and old_state[1] == new_markup:
-        return  # لا تغيير
+        return
 
     try:
         await bot.edit_message_text(
@@ -304,7 +332,7 @@ async def update_panel_message(sid, bot):
         if "Message is not modified" not in str(e):
             logger.error(f"Panel update error for {sid}: {e}")
 
-# ========== منطق البث ==========
+# ========== منطق البث المحسّن (مقاوم للقطع) ==========
 async def start_stream(sid, bot):
     s = streams[sid]
     src = s["source"]
@@ -317,40 +345,46 @@ async def start_stream(sid, bot):
     os.makedirs(out_dir, exist_ok=True)
     out_playlist = os.path.join(out_dir, "index.m3u8")
 
-    # بناء أمر ffmpeg
+    # معلمات ffmpeg الموحدة المقاومة للقطع
+    input_opts = [
+        "-re",
+        "-user_agent", user_agent,
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "10",   # زيادة المهلة
+        "-timeout", "10000000",
+        "-rw_timeout", "10000000",
+        "-fflags", "+genpts+discardcorrupt",
+        "-analyzeduration", "1000000",
+        "-probesize", "1000000",
+        "-max_muxing_queue_size", "1024",
+        "-i", src
+    ]
+
     if stream_type == "rtmp":
         rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
-        base_cmd = [
-            "ffmpeg", "-re",
-            "-user_agent", user_agent,
-            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-            "-rw_timeout", "10000000", "-fflags", "+genpts+discardcorrupt",
-            "-i", src
-        ]
         if mode == "copy":
-            cmd = base_cmd + ["-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-f", "flv", rtmp_url]
+            cmd = ["ffmpeg"] + input_opts + [
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                "-f", "flv", rtmp_url
+            ]
         else:
             filter_cmd = []
             if logo:
                 filter_cmd = ["-i", logo, "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo];[logo][ref]overlay=0:0"]
-            cmd = base_cmd + filter_cmd + [
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            cmd = ["ffmpeg"] + input_opts + filter_cmd + [
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                 "-b:v", "3000k", "-maxrate", "3000k", "-bufsize", "6000k",
                 "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
                 "-f", "flv", rtmp_url
             ]
         fallback_cmd = None
     else:  # HLS
-        base_cmd = [
-            "ffmpeg", "-re",
-            "-user_agent", user_agent,
-            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-            "-rw_timeout", "10000000", "-fflags", "+genpts+discardcorrupt",
-            "-i", src
-        ]
         if mode == "copy":
-            cmd = base_cmd + [
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+            cmd = ["ffmpeg"] + input_opts + [
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
                 "-hls_flags", "delete_segments", out_playlist
             ]
@@ -358,8 +392,8 @@ async def start_stream(sid, bot):
             filter_cmd = []
             if logo:
                 filter_cmd = ["-i", logo, "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo];[logo][ref]overlay=0:0"]
-            cmd = base_cmd + filter_cmd + [
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            cmd = ["ffmpeg"] + input_opts + filter_cmd + [
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                 "-b:v", "3000k", "-maxrate", "3000k", "-bufsize", "6000k",
                 "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
@@ -369,7 +403,7 @@ async def start_stream(sid, bot):
             "ffmpeg", "-re", "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=30",
             "-i", logo if logo else "color=c=black:s=1920x1080:r=30",
             "-filter_complex", "[0:v][1:v]overlay=0:0" if logo else "null",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
             "-hls_flags", "delete_segments", out_playlist
         ]
@@ -380,56 +414,83 @@ async def start_stream(sid, bot):
 
     retries = 3
     while s["active"]:
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        # تشغيل العملية
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
         s["process"] = proc
         s["source_online"] = True
         s["fallback"] = False
 
+        # قراءة stderr لاستخراج FPS والأخطاء
         async def read_stderr():
-            while True:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
-                decoded = line.decode(errors="ignore").strip()
-                if "fps=" in decoded:
-                    m = re.search(r"fps=\s*([\d.]+)", decoded)
-                    if m:
-                        s["last_fps"] = m.group(1)
+            try:
+                while True:
+                    line = await proc.stderr.readline()
+                    if not line:
+                        break
+                    decoded = line.decode(errors="ignore").strip()
+                    if "fps=" in decoded:
+                        m = re.search(r"fps=\s*([\d.]+)", decoded)
+                        if m:
+                            s["last_fps"] = m.group(1)
+                    # تسجيل الأخطاء المهمة
+                    if "error" in decoded.lower() or "failed" in decoded.lower():
+                        logger.warning(f"Stream {sid} ffmpeg: {decoded}")
+            except Exception as e:
+                logger.error(f"Error reading stderr for {sid}: {e}")
 
         stderr_task = asyncio.create_task(read_stderr())
 
+        # حلقة تحديث اللوحة والتحقق من بقاء العملية
         while proc.returncode is None:
             clean_viewers()
             s["uptime"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
             await update_panel_message(sid, bot)
             await asyncio.sleep(5)
 
+        # انتهت العملية بشكل غير متوقع
         await proc.wait()
         stderr_task.cancel()
         s["source_online"] = False
         await update_panel_message(sid, bot)
 
+        # تسجيل سبب الخروج
+        logger.warning(f"Stream {sid} stopped unexpectedly. Return code: {proc.returncode}")
+
+        # إعادة المحاولة إذا كان البث لا يزال نشطاً
         retries -= 1
         if retries > 0 and s["active"]:
             await asyncio.sleep(2)
             continue
 
-        # استخدام Fallback إذا كان متاحاً
+        # استخدام الفول باك إذا كان متاحاً
         if s["active"] and fallback_cmd:
-            fallback_proc = await asyncio.create_subprocess_exec(*fallback_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            logger.info(f"Starting fallback stream for {sid}")
+            fallback_proc = await asyncio.create_subprocess_exec(
+                *fallback_cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
             s["process"] = fallback_proc
             s["fallback"] = True
             s["source_online"] = False
             await update_panel_message(sid, bot)
-            await asyncio.sleep(20)
-            # إنهاء العملية الاحتياطية بأمان
+            await asyncio.sleep(20)  # مدة الفول باك
+            # إنهاء الفول باك بأمان
             if fallback_proc.returncode is None:
-                fallback_proc.kill()
-                await fallback_proc.wait()
+                try:
+                    fallback_proc.kill()
+                    await fallback_proc.wait()
+                except ProcessLookupError:
+                    pass
             retries = 3
         else:
             break
 
+    # تنظيف عند الخروج النهائي
     if s.get("process") and s["process"].returncode is None:
         try:
             s["process"].kill()
@@ -492,7 +553,7 @@ async def button_handler(update, context):
     chat_id = q.message.chat_id
 
     if d == "monitor":
-        await start_monitor_live(q, chat_id, q.message.message_id)
+        await start_monitor_live(q)
         return
     if d == "stop_monitor":
         await stop_monitor(chat_id, q)
@@ -512,7 +573,6 @@ async def button_handler(update, context):
         return
 
     if d.startswith("newtype_"):
-        # معالجة اختيار نوع البث الجديد
         name = context.user_data.get("new_name", "بث")
         stream_type = "hls" if d == "newtype_hls" else "rtmp"
         raw_name = name.replace(' ', '_')
@@ -613,7 +673,8 @@ async def msg_handler(update, context):
         return
     if text == "🖥 مراقبة":
         msg = await update.message.reply_text("⏳ جاري تحميل حالة السيرفر...")
-        await start_monitor_live(None, update.message.chat_id, msg.message_id)
+        # تمرير update نفسه و chat_id و message_id
+        await start_monitor_live(update, chat_id=update.message.chat_id, message_id=msg.message_id)
         return
 
     mode = context.user_data.get("mode")
