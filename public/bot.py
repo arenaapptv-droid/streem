@@ -50,7 +50,7 @@ def save_streams():
         json.dump(data, f, indent=2)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("RplayFinal")
+logger = logging.getLogger("RplayLowCPU")
 
 viewer_last_seen = defaultdict(dict)
 
@@ -185,9 +185,8 @@ def stream_panel_keyboard(sid, s):
         InlineKeyboardButton("🕵️ UA", callback_data=f"ua_{sid}"),
         InlineKeyboardButton("✏️ إعادة تسمية", callback_data=f"rename_{sid}")
     ])
-    # زر تبديل الوضع
     if mode == "transcode":
-        toggle_text = "🔄 نسخ مباشر (H.264)"
+        toggle_text = "🔄 نسخ مباشر (أخف)"
         toggle_data = f"togglemode_{sid}"
     else:
         toggle_text = "⚙️ ترميز (شعار)"
@@ -198,7 +197,7 @@ def stream_panel_keyboard(sid, s):
         source_status = "🟢" if s.get("source_online") else "🔴"
         viewers = len(s.get("viewers", set()))
         uptime = s.get('uptime', '00:00:00')
-        mode_label = "نسخ (H.264)" if mode == "copy" else "ترميز"
+        mode_label = "نسخ" if mode == "copy" else "ترميز"
         info = f"{source_status} FPS:{s.get('last_fps','?')} | ⏱️{uptime} | 👥{viewers} | {mode_label}"
         kb.append([InlineKeyboardButton(info, callback_data="noop")])
     kb.append([InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")])
@@ -206,7 +205,7 @@ def stream_panel_keyboard(sid, s):
 
 async def start(update, context):
     if not await check_admin(update): return
-    await update.message.reply_text("🖥 **Rplay Dynamic**", reply_markup=main_menu())
+    await update.message.reply_text("🖥 **Rplay Low CPU**", reply_markup=main_menu())
 
 async def button_handler(update, context):
     q = update.callback_query
@@ -223,7 +222,7 @@ async def button_handler(update, context):
         return
 
     if d == "main_menu":
-        await q.edit_message_text("🖥 **Rplay Dynamic**", reply_markup=main_menu())
+        await q.edit_message_text("🖥 **Rplay Low CPU**", reply_markup=main_menu())
     elif d == "add_stream":
         context.user_data["mode"] = "add_stream"
         await q.edit_message_text("📝 أرسل اسم البث الجديد:")
@@ -291,9 +290,9 @@ async def button_handler(update, context):
             if s.get("active"):
                 await stop_stream(sid, context.bot)
                 asyncio.create_task(start_stream(sid, context.bot))
-                await q.answer(f"⏳ جاري التشغيل بوضع {'نسخ (H.264)' if new_mode == 'copy' else 'ترميز'}...")
+                await q.answer(f"⏳ جاري التشغيل بوضع {'نسخ (أخف)' if new_mode == 'copy' else 'ترميز'}...")
             else:
-                await q.answer(f"✅ تم التبديل إلى وضع {'نسخ (H.264)' if new_mode == 'copy' else 'ترميز'}")
+                await q.answer(f"✅ تم التبديل إلى وضع {'نسخ (أخف)' if new_mode == 'copy' else 'ترميز'}")
             await q.edit_message_text(
                 f"🎛️ **{name}**\n"
                 f"📥 المصدر: {s['source'] or 'غير محدد'}\n"
@@ -369,7 +368,7 @@ async def update_panel_message(sid, bot):
         source_status = "🟢" if s.get("source_online") else "🔴"
         viewers = len(s.get("viewers", set()))
         uptime = s.get('uptime', '00:00:00')
-        mode_label = "نسخ (H.264)" if s.get("mode") == "copy" else "ترميز"
+        mode_label = "نسخ" if s.get("mode") == "copy" else "ترميز"
         info = f"{source_status} FPS:{s.get('last_fps','?')} | ⏱️{uptime} | 👥{viewers} | {mode_label}"
         text = (
             f"🎛️ **{name}**\n"
@@ -399,7 +398,7 @@ async def start_stream(sid, bot):
     out_playlist = os.path.join(out_dir, "index.m3u8")
 
     if mode == "copy":
-        # وضع النسخ: يضمن خروج H.264 بإعادة ترميج سريع وخفيف (بدون شعار)
+        # وضع النسخ الحقيقي (خفيف جداً)
         base_cmd = [
             "ffmpeg",
             "-re",
@@ -410,10 +409,7 @@ async def start_stream(sid, bot):
             "-rw_timeout", "10000000",
             "-fflags", "+genpts+discardcorrupt",
             "-i", src,
-            "-c:v", "libx264",
-            "-preset", "superfast",
-            "-crf", "23",
-            "-pix_fmt", "yuv420p",
+            "-c:v", "copy",
             "-c:a", "aac",
             "-b:a", "128k",
             "-ar", "44100",
@@ -424,10 +420,9 @@ async def start_stream(sid, bot):
             "-hls_flags", "delete_segments",
             out_playlist
         ]
-        # لا يوجد fallback في وضع النسخ (الشاشة السوداء تتطلب ترميز)
         fallback_cmd = None
     else:
-        # وضع الترميز الكامل (مع شعار)
+        # وضع الترميز (خفيف جداً)
         base_cmd = [
             "ffmpeg",
             "-re",
@@ -447,14 +442,14 @@ async def start_stream(sid, bot):
             ]
         base_cmd += [
             "-c:v", "libx264",
-            "-preset", "superfast",
+            "-preset", "ultrafast",
             "-crf", "23",
-            "-b:v", "4000k",
-            "-maxrate", "4000k",
-            "-bufsize", "8000k",
+            "-b:v", "3000k",
+            "-maxrate", "3000k",
+            "-bufsize", "6000k",
             "-vsync", "cfr",
             "-r", "30",
-            "-threads", "3",
+            "-threads", "2",
             "-c:a", "aac",
             "-b:a", "128k",
             "-ar", "44100",
@@ -470,7 +465,7 @@ async def start_stream(sid, bot):
             "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=30",
             "-i", logo if logo else "color=c=black:s=1920x1080:r=30",
             "-filter_complex", "[0:v][1:v]overlay=0:0" if logo else "null",
-            "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
             "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
             "-hls_flags", "delete_segments",
             out_playlist
@@ -574,5 +569,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay Always H264 Ready")
+    logger.info("Rplay Ultra Low CPU Ready")
     app.run_polling()
