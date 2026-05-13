@@ -48,10 +48,8 @@ processes = {}
 viewers = defaultdict(set)
 viewer_last = defaultdict(dict)
 
-# لتخزين معرف الرسالة الخاصة بكل بث
 stream_message_ids = {}
 
-# متغيرات المراقبة
 monitor_active = False
 monitor_task = None
 monitor_chat_id = None
@@ -251,7 +249,7 @@ def streams_inline_keyboard(stream_type):
     return InlineKeyboardMarkup(kb)
 
 # =========================================
-# FFMPEG STREAM (FIXED FILTER)
+# FFMPEG STREAM (FIXED FILTER - COVER FULL SCREEN)
 # =========================================
 async def start_stream(sid, bot):
     s = streams[sid]
@@ -276,7 +274,6 @@ async def start_stream(sid, bot):
         video_opts = ["-c:v", "copy"]
         filter_complex = None
     else:
-        # video codec options (no -vf here)
         video_opts = [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
@@ -284,11 +281,9 @@ async def start_stream(sid, bot):
             "-vsync", "cfr", "-r", "30"
         ]
         if logo:
-            # add logo with scaling and overlay
-            filter_complex = "[1:v]scale=iw:ih[logo];[0:v][logo]overlay=0:0"
+            filter_complex = "[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0"
         else:
-            # only resize if needed
-            filter_complex = f"[0:v]scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"
+            filter_complex = "[0:v]scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"
 
     audio_opts = ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
 
@@ -298,7 +293,7 @@ async def start_stream(sid, bot):
                 "ffmpeg", "-re", "-user_agent", ua,
                 *reconnect_opts,
                 "-i", src,
-                "-i", logo if logo else src,
+                "-i", logo,
                 "-filter_complex", filter_complex,
                 *video_opts, *audio_opts,
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
@@ -313,14 +308,14 @@ async def start_stream(sid, bot):
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
                 "-hls_flags", "delete_segments", out_file
             ]
-    else:  # RTMP
+    else:
         rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
         if filter_complex:
             cmd = [
                 "ffmpeg", "-re", "-user_agent", ua,
                 *reconnect_opts,
                 "-i", src,
-                "-i", logo if logo else src,
+                "-i", logo,
                 "-filter_complex", filter_complex,
                 *video_opts, *audio_opts,
                 "-f", "flv", rtmp_url
@@ -334,7 +329,6 @@ async def start_stream(sid, bot):
                 "-f", "flv", rtmp_url
             ]
 
-    # kill previous process if exists
     if sid in processes:
         try:
             processes[sid].terminate()
@@ -392,7 +386,7 @@ async def stop_stream(sid, bot):
     await update_stream_message(sid, bot)
 
 # =========================================
-# مراقبة السيرفر (تحديث كل 3 ثوانٍ)
+# MONITOR SERVER (UPDATE EVERY 3 SEC)
 # =========================================
 async def monitor_loop(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id, message_id):
     global monitor_active
@@ -413,16 +407,36 @@ async def monitor_loop(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_
         except Exception as e:
             print(f"Monitor edit error: {e}")
         await asyncio.sleep(3)
-    # عند الخروج من الحلقة (تم إيقاف المراقبة)، نرسل حالة ثابتة
     try:
         await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text=system_status(),
-            reply_markup=main_kb,
+            reply_markup=inline_main_menu(),
             parse_mode="Markdown"
         )
     except: pass
+
+# =========================================
+# INLINE MAIN MENU (for editing)
+# =========================================
+def inline_main_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📺 قائمة HLS", callback_data="list_hls")],
+        [InlineKeyboardButton("📡 قائمة RTMP", callback_data="list_rtmp")],
+        [InlineKeyboardButton("➕ إضافة بث", callback_data="add_stream")],
+        [InlineKeyboardButton("🖥 مراقبة السيرفر", callback_data="monitor_server")],
+        [InlineKeyboardButton("🧹 تنظيف الملفات", callback_data="clean_files")]
+    ])
+
+# =========================================
+# REPLY KEYBOARD (for start command)
+# =========================================
+reply_kb = ReplyKeyboardMarkup([
+    ["📺 قائمة HLS", "📡 قائمة RTMP"],
+    ["➕ إضافة بث", "🖥 مراقبة السيرفر"],
+    ["🧹 تنظيف الملفات"]
+], resize_keyboard=True)
 
 # =========================================
 # CALLBACK HANDLER
@@ -440,7 +454,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             monitor_active = False
             if monitor_task:
                 monitor_task.cancel()
-        await query.edit_message_text("🎬 القائمة الرئيسية", reply_markup=main_kb)
+        await query.edit_message_text("🎬 القائمة الرئيسية", reply_markup=inline_main_menu())
         return
 
     if data == "stop_monitor":
@@ -448,7 +462,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             monitor_active = False
             if monitor_task:
                 monitor_task.cancel()
-        await query.edit_message_text(system_status(), reply_markup=main_kb, parse_mode="Markdown")
+        await query.edit_message_text(system_status(), reply_markup=inline_main_menu(), parse_mode="Markdown")
         return
 
     if data == "list_hls":
@@ -456,6 +470,40 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data == "list_rtmp":
         await query.edit_message_text("📡 بثوث RTMP:", reply_markup=streams_inline_keyboard("rtmp"))
+        return
+
+    if data == "add_stream":
+        context.user_data["step"] = "add_name"
+        await query.edit_message_text("📝 أرسل اسم البث الجديد:")
+        return
+
+    if data == "monitor_server":
+        if monitor_active:
+            monitor_active = False
+            if monitor_task:
+                monitor_task.cancel()
+            try:
+                await query.edit_message_text(system_status(), reply_markup=inline_main_menu(), parse_mode="Markdown")
+            except:
+                pass
+            return
+        # بدء مراقبة جديدة
+        status_text = system_status()
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏹ إيقاف المراقبة", callback_data="stop_monitor")],
+            [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")]
+        ])
+        await query.edit_message_text(status_text, reply_markup=kb, parse_mode="Markdown")
+        monitor_chat_id = chat_id
+        monitor_msg_id = message_id
+        monitor_active = True
+        monitor_task = asyncio.create_task(monitor_loop(update, context, monitor_chat_id, monitor_msg_id))
+        return
+
+    if data == "clean_files":
+        shutil.rmtree(HLS_DIR, ignore_errors=True)
+        os.makedirs(HLS_DIR, exist_ok=True)
+        await query.edit_message_text("✅ تم تنظيف مجلد HLS", reply_markup=inline_main_menu())
         return
 
     if data.startswith("open_"):
@@ -559,7 +607,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_streams()
         await query.edit_message_text(
             "🗑 تم حذف البث",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")]])
+            reply_markup=inline_main_menu()
         )
         return
 
@@ -569,7 +617,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # TEXT MESSAGE HANDLER
 # =========================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global monitor_active, monitor_task, monitor_chat_id, monitor_msg_id
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("🚫 غير مصرح")
         return
@@ -577,6 +624,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     chat_id = update.effective_chat.id
 
+    # هنا نستخدم reply_kb (ReplyKeyboardMarkup) للردود العادية
     if text == "📺 قائمة HLS":
         await update.message.reply_text("📺 بثوث HLS:", reply_markup=streams_inline_keyboard("hls"))
         return
@@ -588,24 +636,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📝 أرسل اسم البث الجديد:")
         return
     if text == "🖥 مراقبة السيرفر":
-        # إذا كانت المراقبة نشطة، نوقفها
-        if monitor_active:
-            monitor_active = False
-            if monitor_task:
-                monitor_task.cancel()
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=monitor_chat_id,
-                    message_id=monitor_msg_id,
-                    text=system_status(),
-                    reply_markup=main_kb,
-                    parse_mode="Markdown"
-                )
-            except:
-                pass
-            return
-        # بدء مراقبة جديدة
-        msg = await update.message.reply_text("⏳ جاري تحميل حالة السيرفر...")
+        # إرسال رسالة جديدة للمراقبة (تستخدم InlineKeyboard)
+        status_text = system_status()
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏹ إيقاف المراقبة", callback_data="stop_monitor")],
+            [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")]
+        ])
+        msg = await update.message.reply_text(status_text, reply_markup=kb, parse_mode="Markdown")
         monitor_chat_id = msg.chat_id
         monitor_msg_id = msg.message_id
         monitor_active = True
@@ -706,15 +743,6 @@ async def set_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ خطأ")
 
 # =========================================
-# MAIN KEYBOARD
-# =========================================
-main_kb = ReplyKeyboardMarkup([
-    ["📺 قائمة HLS", "📡 قائمة RTMP"],
-    ["➕ إضافة بث", "🖥 مراقبة السيرفر"],
-    ["🧹 تنظيف الملفات"]
-], resize_keyboard=True)
-
-# =========================================
 # START COMMAND
 # =========================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -728,7 +756,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📺 HLS: بث لمتصفحات / أجهزة.\n"
         "📡 RTMP: بث لـ YouTube / Facebook / Twitch.\n\n"
         "استخدم الأزرار أدناه:",
-        reply_markup=main_kb
+        reply_markup=reply_kb
     )
 
 # =========================================
