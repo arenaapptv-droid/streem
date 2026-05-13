@@ -362,7 +362,19 @@ async def start_stream(sid, bot):
                 print(f"[{sid}] ffmpeg: {txt}")
     asyncio.create_task(stderr_reader())
 
-    await proc.wait()
+    # تحديث اللوحة بفاصل متصاعد (يبدأ 5 ثوانٍ حتى يصل 300 ثانية)
+    interval = 5
+    max_interval = 300
+    stable_cycles = 0
+    while proc.returncode is None:
+        await asyncio.sleep(interval)
+        clean_viewers()
+        s["uptime"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
+        await update_stream_message(sid, bot)
+        stable_cycles += 1
+        if stable_cycles % 3 == 0 and interval < max_interval:
+            interval = min(interval + 5, max_interval)
+
     s["active"] = False
     processes.pop(sid, None)
     save_streams()
@@ -487,7 +499,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
             return
-        # بدء مراقبة جديدة
         status_text = system_status()
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("⏹ إيقاف المراقبة", callback_data="stop_monitor")],
@@ -624,7 +635,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     chat_id = update.effective_chat.id
 
-    # هنا نستخدم reply_kb (ReplyKeyboardMarkup) للردود العادية
     if text == "📺 قائمة HLS":
         await update.message.reply_text("📺 بثوث HLS:", reply_markup=streams_inline_keyboard("hls"))
         return
@@ -636,7 +646,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📝 أرسل اسم البث الجديد:")
         return
     if text == "🖥 مراقبة السيرفر":
-        # إرسال رسالة جديدة للمراقبة (تستخدم InlineKeyboard)
         status_text = system_status()
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("⏹ إيقاف المراقبة", callback_data="stop_monitor")],
@@ -654,10 +663,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ تم تنظيف مجلد HLS")
         return
 
-    # إضافة بث جديد
+    # إضافة بث جديد مع اسم sid بسيط
     if context.user_data.get("step") == "add_name":
         name = text.strip()
-        sid = name.replace(" ", "_") + str(int(time.time()))
+        base_sid = name.replace(" ", "_")
+        # تجنب التكرار دون استخدام timestamp
+        if base_sid not in streams:
+            sid = base_sid
+        else:
+            counter = 1
+            while f"{base_sid}_{counter}" in streams:
+                counter += 1
+            sid = f"{base_sid}_{counter}"
         streams[sid] = {
             "name": name,
             "source": "",
