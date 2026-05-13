@@ -11,11 +11,13 @@ from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
+# ========== إعدادات السجل ==========
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 logger = logging.getLogger("RplayStable")
 
+# ========== الإعدادات ==========
 with open("settings.json", "r") as f:
     settings = json.load(f)
     TOKEN = settings["TOKEN"]
@@ -28,6 +30,7 @@ BASE_URL = "http://164.68.102.28"
 STREAMS_FILE = "streams_pro.json"
 streams = {}
 
+# ========== تحميل البثوث المحفوظة ==========
 if os.path.exists(STREAMS_FILE):
     try:
         with open(STREAMS_FILE) as f:
@@ -85,6 +88,7 @@ def clean_viewers():
                 if ip in viewer_last_seen[sid]:
                     del viewer_last_seen[sid][ip]
 
+# ========== خادم HLS ==========
 async def handle_hls(request):
     name = request.match_info["name"]
     file = request.match_info.get("file", "index.m3u8")
@@ -107,6 +111,7 @@ async def start_http_server():
     await site.start()
     logger.info(f"HTTP server running on port {HTTP_PORT}")
 
+# ========== حالة النظام ==========
 def get_system_status():
     cpu = 0.0
     try:
@@ -162,6 +167,7 @@ async def stop_monitor(chat_id, query):
     status = get_system_status()
     await query.edit_message_text(status, reply_markup=main_menu())
 
+# ========== التحقق من الصلاحية ==========
 async def check_admin(update):
     if update.effective_user.id != ADMIN_ID:
         if update.message:
@@ -171,6 +177,7 @@ async def check_admin(update):
         return False
     return True
 
+# ========== واجهة المستخدم ==========
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton("📺 HLS"), KeyboardButton("📡 RTMP")],
      [KeyboardButton("➕ إضافة"), KeyboardButton("🖥 مراقبة")]],
@@ -238,12 +245,14 @@ def stream_panel_keyboard(sid, s):
     kb.append(navigation_row())
     return InlineKeyboardMarkup(kb)
 
+# ========== بدء البوت ==========
 async def start(update, context):
     if not await check_admin(update):
         return
     await update.message.reply_text("🖥 **Rplay HLS & RTMP**", reply_markup=main_menu())
     await update.message.reply_text("اختر من الأزرار السفلية للتنقل السريع:", reply_markup=MAIN_KEYBOARD)
 
+# ========== معالجة الأزرار المضمنة ==========
 async def button_handler(update, context):
     q = update.callback_query
     await q.answer()
@@ -358,6 +367,7 @@ async def button_handler(update, context):
             reply_markup=stream_panel_keyboard(sid, s)
         )
 
+# ========== معالجة الرسائل النصية ==========
 async def msg_handler(update, context):
     if not await check_admin(update):
         return
@@ -426,6 +436,9 @@ async def msg_handler(update, context):
         await update.message.reply_text(f"✅ تم حفظ {act} لـ {s['name']}")
         await update_panel_message(sid, context.bot)
 
+# ========== تحديث لوحة التحكم مع تجنب الخطأ ==========
+panel_last_state = {}
+
 async def update_panel_message(sid, bot):
     s = streams.get(sid)
     if not s or not s.get("panel_msg_id") or not s.get("panel_chat_id"):
@@ -441,16 +454,23 @@ async def update_panel_message(sid, bot):
             f"🖼 الشعار: {'موجود' if s['logo'] else 'لا يوجد'}\n"
             f"🕵️ UA: {s['user_agent'] or 'افتراضي'}{rtmp_info}{link}"
         )
+        new_markup = stream_panel_keyboard(sid, s)
+        key = (s["panel_chat_id"], s["panel_msg_id"])
+        old_state = panel_last_state.get(key)
+        if old_state and old_state[0] == text and old_state[1] == new_markup:
+            return
         await bot.edit_message_text(
             chat_id=s["panel_chat_id"],
             message_id=s["panel_msg_id"],
             text=text,
-            reply_markup=stream_panel_keyboard(sid, s)
+            reply_markup=new_markup
         )
+        panel_last_state[key] = (text, new_markup)
     except Exception as e:
         if "Message is not modified" not in str(e):
             logger.error(f"Update panel error: {e}")
 
+# ========== تشغيل البث مع تحميل مسبق 10 ثوانٍ / 30 ميجا ==========
 async def start_stream(sid, bot):
     s = streams[sid]
     src = s["source"]
@@ -463,18 +483,17 @@ async def start_stream(sid, bot):
     os.makedirs(out_dir, exist_ok=True)
     out_playlist = os.path.join(out_dir, "index.m3u8")
 
-    # خيارات تسريع بدء البث (preload)
-    fast_start_opts = [
-        "-analyzeduration", "0",
-        "-probesize", "32",
-        "-fflags", "nobuffer",
-        "-flags", "low_delay"
+    # إعدادات التحميل المسبق المطلوبة: 10 ثوانٍ أو 30 ميجابايت
+    preload_opts = [
+        "-analyzeduration", "10000000",   # 10 seconds (microseconds)
+        "-probesize", "31457280",         # 30 MB
+        "-fflags", "+genpts+discardcorrupt",
+        "-threads", "2"
     ]
 
     reconnect_opts = [
         "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "10",
-        "-timeout", "10000000", "-rw_timeout", "10000000",
-        "-threads", "2"
+        "-timeout", "10000000", "-rw_timeout", "10000000"
     ]
 
     video_opts = [
@@ -491,7 +510,7 @@ async def start_stream(sid, bot):
         if mode == "copy":
             cmd = [
                 "ffmpeg", "-re", "-user_agent", user_agent,
-                *reconnect_opts, *fast_start_opts,
+                *reconnect_opts, *preload_opts,
                 "-i", src,
                 "-c:v", "copy", *audio_opts,
                 "-f", "flv", rtmp_url
@@ -499,7 +518,7 @@ async def start_stream(sid, bot):
         else:
             cmd = [
                 "ffmpeg", "-re", "-user_agent", user_agent,
-                *reconnect_opts, *fast_start_opts,
+                *reconnect_opts, *preload_opts,
                 "-i", src
             ]
             if logo:
@@ -510,7 +529,7 @@ async def start_stream(sid, bot):
         if mode == "copy":
             cmd = [
                 "ffmpeg", "-re", "-user_agent", user_agent,
-                *reconnect_opts, *fast_start_opts,
+                *reconnect_opts, *preload_opts,
                 "-i", src,
                 "-c:v", "copy", *audio_opts,
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
@@ -519,7 +538,7 @@ async def start_stream(sid, bot):
         else:
             cmd = [
                 "ffmpeg", "-re", "-user_agent", user_agent,
-                *reconnect_opts, *fast_start_opts,
+                *reconnect_opts, *preload_opts,
                 "-i", src
             ]
             if logo:
@@ -530,7 +549,7 @@ async def start_stream(sid, bot):
             ]
         fallback_cmd = [
             "ffmpeg", "-re",
-            *fast_start_opts,
+            *preload_opts,
             "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=30",
             "-i", logo if logo else "color=c=black:s=1920x1080:r=30",
             "-filter_complex", "[0:v][1:v]overlay=0:0" if logo else "null",
@@ -607,6 +626,7 @@ async def start_stream(sid, bot):
     save_streams()
     await update_panel_message(sid, bot)
 
+# ========== إيقاف البث ==========
 async def stop_stream(sid, bot):
     s = streams.get(sid)
     if not s:
@@ -635,6 +655,7 @@ async def stop_stream(sid, bot):
     save_streams()
     await update_panel_message(sid, bot)
 
+# ========== إضافة بث جديد ==========
 async def newtype_callback(update, context):
     q = update.callback_query
     await q.answer()
@@ -663,10 +684,12 @@ async def extra_button_handler(update, context):
     else:
         await button_handler(update, context)
 
+# ========== معالج الأخطاء ==========
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tb_str = ''.join(traceback.format_exception(None, context.error, context.error.__traceback__))
     logger.error(f"Update {update} caused error: {context.error}\n{tb_str}")
 
+# ========== التشغيل الرئيسي ==========
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
