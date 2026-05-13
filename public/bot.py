@@ -1,7 +1,7 @@
 import asyncio, time, json, os, logging, re, shutil
 from collections import defaultdict
 from aiohttp import web
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # ========== الإعدادات ==========
@@ -163,6 +163,15 @@ async def check_admin(update):
         elif update.callback_query: await update.callback_query.answer("🚫 غير مصرح", show_alert=True)
         return False
     return True
+
+# ---------- لوحة المفاتيح السفلية الدائمة ----------
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("📺 HLS"), KeyboardButton("📡 RTMP")],
+        [KeyboardButton("➕ إضافة"), KeyboardButton("🖥 مراقبة")]
+    ],
+    resize_keyboard=True
+)
 
 def main_menu():
     kb = [
@@ -378,9 +387,28 @@ async def button_handler(update, context):
             reply_markup=stream_panel_keyboard(sid, s)
         )
 
+# ---------- معالجة النصوص (تحديث تلقائي للوحة) ----------
 async def msg_handler(update, context):
     if not await check_admin(update): return
     text = update.message.text.strip()
+
+    # التعامل مع الأزرار السفلية
+    if text == "📺 HLS":
+        await update.message.reply_text("📋 **بثوث HLS**", reply_markup=stream_list("hls"))
+        return
+    elif text == "📡 RTMP":
+        await update.message.reply_text("📋 **بثوث RTMP**", reply_markup=stream_list("rtmp"))
+        return
+    elif text == "➕ إضافة":
+        context.user_data["mode"] = "add_stream_name"
+        await update.message.reply_text("📝 أرسل اسم البث الجديد:")
+        return
+    elif text == "🖥 مراقبة":
+        # بدء المراقبة الحية
+        chat_id = update.message.chat_id
+        await start_monitor_live(update.callback_query, chat_id, None) if False else None
+        return
+
     mode = context.user_data.get("mode")
 
     if mode == "add_stream_name":
@@ -403,29 +431,26 @@ async def msg_handler(update, context):
 
         if act == "source":
             s["source"] = text
-            save_streams()
-            await update.message.reply_text(f"✅ تم حفظ المصدر لـ {s['name']}")
         elif act == "logo":
             s["logo"] = "" if text.lower() == "/skip" else text
-            save_streams()
-            await update.message.reply_text(f"✅ تم تحديث الشعار لـ {s['name']}")
         elif act == "ua":
             s["user_agent"] = "" if text.lower() == "/skip" else text
-            save_streams()
-            await update.message.reply_text(f"✅ تم تحديث User-Agent لـ {s['name']}")
         elif act == "rename":
             old = s["name"]
             s["name"] = text
-            save_streams()
             await update.message.reply_text(f"✅ تم تغيير الاسم من {old} إلى {text}")
+            save_streams()
+            await update_panel_message(sid, context.bot)
+            return
         elif act == "rtmpsrv":
             s["rtmp_server"] = text
-            save_streams()
-            await update.message.reply_text(f"✅ تم حفظ خادم RTMP لـ {s['name']}")
         elif act == "rtmpkey":
             s["rtmp_key"] = text
-            save_streams()
-            await update.message.reply_text(f"✅ تم حفظ مفتاح RTMP لـ {s['name']}")
+
+        save_streams()
+        await update.message.reply_text(f"✅ تم حفظ {act} لـ {s['name']}")
+        # تحديث لوحة التحكم فوراً
+        await update_panel_message(sid, context.bot)
 
 async def update_panel_message(sid, bot):
     s = streams.get(sid)
@@ -676,5 +701,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(extra_button_handler, pattern="^newtype_"))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay UI Enhanced ready")
+    logger.info("Rplay UI Enhanced Final")
     app.run_polling()
