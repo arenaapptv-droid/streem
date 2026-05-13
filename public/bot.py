@@ -17,7 +17,7 @@ from telegram.ext import (
 )
 
 # =========================================
-# PSUTIL (optional)
+# PSUTIL for system monitor (optional)
 # =========================================
 try:
     import psutil
@@ -50,7 +50,6 @@ viewer_last = defaultdict(dict)
 if os.path.exists(STREAMS_FILE):
     with open(STREAMS_FILE) as f:
         streams = json.load(f)
-    # convert viewers from list to set if needed
     for sid, s in streams.items():
         if "viewers" in s and isinstance(s["viewers"], list):
             s["viewers"] = set(s["viewers"])
@@ -60,9 +59,6 @@ if os.path.exists(STREAMS_FILE):
         s.setdefault("rtmp_server", "")
         s.setdefault("rtmp_key", "")
 
-# =========================================
-# SAVE STREAMS
-# =========================================
 def save_streams():
     data = {}
     for sid, s in streams.items():
@@ -75,7 +71,7 @@ def save_streams():
         json.dump(data, f, indent=2)
 
 # =========================================
-# KEYBOARD (main)
+# KEYBOARD - MAIN PANEL
 # =========================================
 main_kb = ReplyKeyboardMarkup([
     ["📺 قائمة HLS", "📡 قائمة RTMP"],
@@ -84,7 +80,7 @@ main_kb = ReplyKeyboardMarkup([
 ], resize_keyboard=True)
 
 # =========================================
-# HTTP SERVER
+# HTTP SERVER (HLS)
 # =========================================
 async def track_viewer(request, sid):
     ip = request.headers.get("X-Forwarded-For", request.remote)
@@ -108,7 +104,7 @@ async def start_http():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"✅ HTTP server running on port {PORT}")
+    print(f"✅ HTTP server on port {PORT}")
 
 # =========================================
 # VIEWERS CLEANUP
@@ -151,7 +147,7 @@ def system_status():
         return f"🖥️ الحمل: {load}\n📺 البثوث: {len(streams)}"
 
 # =========================================
-# STREAM PANEL (with full controls)
+# STREAM PANEL (FULL CONTROLS)
 # =========================================
 async def show_panel(update, sid, context):
     s = streams.get(sid)
@@ -173,16 +169,18 @@ async def show_panel(update, sid, context):
         f"🟢 الحالة: {'يعمل' if s.get('active') else 'متوقف'}\n"
         f"🎬 FPS: {s.get('fps','?')}\n"
         f"👥 المشاهدين: {viewers_count}\n"
-        f"⏱️ التشغيل: {uptime}\n\n"
-        f"🔗 {BASE_URL}:{PORT}/live/{sid}/index.m3u8"
+        f"⏱️ التشغيل: {uptime}\n"
     )
+    if s["type"] == "hls":
+        text += f"\n🔗 HLS: {BASE_URL}:{PORT}/live/{sid}/index.m3u8"
+    else:
+        text += f"\n📡 RTMP: {s.get('rtmp_server')}/{s.get('rtmp_key')}"
 
-    # أزرار التحكم الكاملة
     panel_kb = ReplyKeyboardMarkup([
         ["▶️ تشغيل", "⏹ إيقاف"],
         ["📥 تغيير المصدر", "🖼 تغيير الشعار"],
         ["🕵️ تغيير UA", "✏️ إعادة تسمية"],
-        ["🔄 تبديل الوضع", "🗑 حذف البث"],
+        ["🔄 تبديل الوضع (نسخ/ترميز)", "📡 إعدادات RTMP", "🗑 حذف البث"],
         ["🔙 القائمة الرئيسية"]
     ], resize_keyboard=True)
 
@@ -190,7 +188,7 @@ async def show_panel(update, sid, context):
     await update.message.reply_text(text, reply_markup=panel_kb)
 
 # =========================================
-# FFMPEG STREAM START (with reconnection, loop, scaling)
+# FFMPEG STREAM (supports HLS & RTMP, copy & encode)
 # =========================================
 async def start_stream(sid, chat_id, bot):
     s = streams[sid]
@@ -198,6 +196,7 @@ async def start_stream(sid, chat_id, bot):
     mode = s.get("mode", "copy")
     ua = s.get("ua", "ExoPlayerLib/2.18.5")
     logo = s.get("logo", "")
+    typ = s.get("type", "hls")
 
     out_dir = os.path.join(HLS_DIR, sid)
     os.makedirs(out_dir, exist_ok=True)
@@ -226,18 +225,28 @@ async def start_stream(sid, chat_id, bot):
 
     audio_opts = ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
 
-    if logo and mode != "copy":
-        cmd = base_cmd + ["-i", logo, "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo];[logo][ref]overlay=0:0"] + video_opts + audio_opts + [
-            "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
-            "-hls_flags", "delete_segments", out_file
-        ]
-    else:
-        cmd = base_cmd + video_opts + audio_opts + [
-            "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
-            "-hls_flags", "delete_segments", out_file
-        ]
+    # بناء الأمر حسب النوع
+    if typ == "hls":
+        if logo and mode != "copy":
+            cmd = base_cmd + ["-i", logo, "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo];[logo][ref]overlay=0:0"] + video_opts + audio_opts + [
+                "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+                "-hls_flags", "delete_segments", out_file
+            ]
+        else:
+            cmd = base_cmd + video_opts + audio_opts + [
+                "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+                "-hls_flags", "delete_segments", out_file
+            ]
+    else:  # RTMP
+        rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
+        if logo and mode != "copy":
+            cmd = base_cmd + ["-i", logo, "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo];[logo][ref]overlay=0:0"] + video_opts + audio_opts + [
+                "-f", "flv", rtmp_url
+            ]
+        else:
+            cmd = base_cmd + video_opts + audio_opts + ["-f", "flv", rtmp_url]
 
-    # kill previous process if exists
+    # إيقاف العملية القديمة
     if sid in processes:
         try:
             processes[sid].terminate()
@@ -245,7 +254,6 @@ async def start_stream(sid, chat_id, bot):
             processes[sid].kill()
         except:
             pass
-        processes.pop(sid, None)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -267,19 +275,15 @@ async def start_stream(sid, chat_id, bot):
             if m:
                 s["fps"] = m.group(1)
             if "error" in txt.lower():
-                print(f"[{sid}] ffmpeg error: {txt}")
-
+                print(f"[{sid}] ffmpeg: {txt}")
     asyncio.create_task(stderr_reader())
-    await proc.wait()
 
+    await proc.wait()
     s["active"] = False
     processes.pop(sid, None)
     save_streams()
     await bot.send_message(chat_id, f"⛔ توقف بث {s['name']}")
 
-# =========================================
-# STOP STREAM
-# =========================================
 async def stop_stream(sid):
     if sid in processes:
         try:
@@ -292,13 +296,12 @@ async def stop_stream(sid):
     if sid in streams:
         streams[sid]["active"] = False
         save_streams()
-    # clean HLS files
     path = os.path.join(HLS_DIR, sid)
     if os.path.exists(path):
         shutil.rmtree(path, ignore_errors=True)
 
 # =========================================
-# MESSAGE HANDLER (full admin panel)
+# MESSAGE HANDLER (ALL COMMANDS)
 # =========================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -308,7 +311,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     chat_id = update.effective_chat.id
 
-    # ----- قوائم البثوث -----
+    # ----- قوائم البث -----
     if text == "📺 قائمة HLS":
         msg = "📺 **بثوث HLS**\n"
         for sid, s in streams.items():
@@ -341,13 +344,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.makedirs(HLS_DIR, exist_ok=True)
         await update.message.reply_text("✅ تم تنظيف مجلد HLS")
 
+    # ----- إضافة بث (خطوات) -----
     elif context.user_data.get("step") == "add_name":
         name = text.strip()
         sid = name.replace(" ", "_") + str(int(time.time()))
         streams[sid] = {
             "name": name,
             "source": "",
-            "type": "hls",
+            "type": "hls",   # سيتم التبديل لاحقاً من الإعدادات
             "mode": "copy",
             "active": False,
             "fps": "?",
@@ -367,10 +371,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             streams[sid]["source"] = text
             save_streams()
             context.user_data["step"] = None
-            # بعد الإضافة نعرض لوحة التحكم
-            await show_panel(update, sid, context)
+            # بعد الإضافة نعرض لوحة التحكم لاختيار النوع والإعدادات
+            # نعرض له قائمة لاختيار نوع البث
+            type_kb = ReplyKeyboardMarkup([
+                ["HLS (لمتصفحات/أجهزة)", "RTMP (للبث المباشر)"]
+            ], resize_keyboard=True)
+            context.user_data["wait_type_for"] = sid
+            await update.message.reply_text("اختر نوع البث:", reply_markup=type_kb)
         else:
             await update.message.reply_text("❌ خطأ، حاول مرة أخرى")
+
+    elif context.user_data.get("wait_type_for"):
+        sid = context.user_data["wait_type_for"]
+        if text.startswith("HLS"):
+            streams[sid]["type"] = "hls"
+        elif text.startswith("RTMP"):
+            streams[sid]["type"] = "rtmp"
+            # طلب إعدادات RTMP فوراً
+            context.user_data["step"] = "rtmp_server"
+            await update.message.reply_text("📡 أرسل عنوان خادم RTMP (مثال: rtmp://live.twitch.tv/app):")
+            context.user_data.pop("wait_type_for", None)
+            return
+        else:
+            await update.message.reply_text("❌ اختر HLS أو RTMP")
+            return
+        save_streams()
+        context.user_data.pop("wait_type_for", None)
+        await show_panel(update, sid, context)
+
+    elif context.user_data.get("step") == "rtmp_server":
+        sid = context.user_data.get("sid")
+        if sid:
+            streams[sid]["rtmp_server"] = text
+            context.user_data["step"] = "rtmp_key"
+            await update.message.reply_text("🔑 أرسل مفتاح البث (stream key):")
+        else:
+            context.user_data.pop("step", None)
+            await update.message.reply_text("❌ خطأ")
+
+    elif context.user_data.get("step") == "rtmp_key":
+        sid = context.user_data.get("sid")
+        if sid:
+            streams[sid]["rtmp_key"] = text
+            save_streams()
+            context.user_data.pop("step", None)
+            context.user_data.pop("sid", None)
+            await show_panel(update, sid, context)
+        else:
+            context.user_data.pop("step", None)
+            await update.message.reply_text("❌ خطأ")
 
     # ----- أزرار التحكم في البث الحالي -----
     elif text == "▶️ تشغيل":
@@ -383,6 +432,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if not streams[sid].get("source"):
             await update.message.reply_text("❌ لا يوجد مصدر. استخدم 'تغيير المصدر' أولاً")
+            return
+        if streams[sid]["type"] == "rtmp" and (not streams[sid].get("rtmp_server") or not streams[sid].get("rtmp_key")):
+            await update.message.reply_text("❌ إعدادات RTMP غير مكتملة. استخدم '📡 إعدادات RTMP'")
             return
         asyncio.create_task(start_stream(sid, chat_id, context.bot))
         await update.message.reply_text("▶️ جاري تشغيل البث...")
@@ -427,7 +479,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["edit"] = ("rename", sid)
         await update.message.reply_text("✏️ أرسل الاسم الجديد:")
 
-    elif text == "🔄 تبديل الوضع":
+    elif text == "🔄 تبديل الوضع (نسخ/ترميز)":
         sid = context.user_data.get("current_sid")
         if not sid:
             await update.message.reply_text("❌ اختر بثاً أولاً")
@@ -435,8 +487,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         old = streams[sid]["mode"]
         streams[sid]["mode"] = "encode" if old == "copy" else "copy"
         save_streams()
-        await update.message.reply_text(f"⚙️ تم تبديل الوضع إلى: {'ترميز' if streams[sid]['mode']=='encode' else 'نسخ مباشر'}")
-        # إعادة عرض اللوحة بعد التغيير
+        await update.message.reply_text(f"⚙️ تم تبديل الوضع إلى: {'ترميز (جودة عالية)' if streams[sid]['mode']=='encode' else 'نسخ مباشر'}")
+        # إعادة عرض اللوحة
+        await show_panel(update, sid, context)
+
+    elif text == "📡 إعدادات RTMP":
+        sid = context.user_data.get("current_sid")
+        if not sid:
+            await update.message.reply_text("❌ اختر بثاً أولاً")
+            return
+        if streams[sid].get("type") != "rtmp":
+            await update.message.reply_text("⚠️ هذا البث ليس من نوع RTMP. غيّر نوعه أولاً (غير مدعوم حالياً)")
+            return
+        context.user_data["edit_rtmp"] = sid
+        await update.message.reply_text("📡 أرسل خادم RTMP الجديد (مثال: rtmp://live.twitch.tv/app):")
+
+    elif context.user_data.get("edit_rtmp"):
+        sid = context.user_data["edit_rtmp"]
+        if not streams[sid].get("rtmp_server"):
+            streams[sid]["rtmp_server"] = text
+            await update.message.reply_text("🔑 أرسل مفتاح البث (stream key):")
+            context.user_data["edit_rtmp"] = None
+            context.user_data["edit_rtmp_key"] = sid
+        else:
+            await update.message.reply_text("❌ خطأ")
+
+    elif context.user_data.get("edit_rtmp_key"):
+        sid = context.user_data["edit_rtmp_key"]
+        streams[sid]["rtmp_key"] = text
+        save_streams()
+        context.user_data.pop("edit_rtmp_key", None)
+        await update.message.reply_text("✅ تم حفظ إعدادات RTMP")
         await show_panel(update, sid, context)
 
     elif text == "🗑 حذف البث":
@@ -454,7 +535,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("القائمة الرئيسية", reply_markup=main_kb)
         context.user_data.pop("current_sid", None)
 
-    # معالجة التعديلات (source, logo, ua, rename)
+    # ----- معالجة التعديلات -----
     elif context.user_data.get("edit"):
         typ, sid = context.user_data["edit"]
         if typ == "source":
@@ -472,11 +553,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ تم تغيير الاسم من {old} إلى {text}")
         save_streams()
         context.user_data.pop("edit", None)
-        # إعادة عرض اللوحة بعد التعديل
         await show_panel(update, sid, context)
 
     else:
-        # محاولة فتح لوحة بث باسم مطابق
+        # البحث عن بث باسم مطابق
         found = False
         for sid, s in streams.items():
             if s["name"] == text:
@@ -487,29 +567,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ اختر من الأزرار أو أرسل اسم بث موجود")
 
 # =========================================
-# START BOT COMMAND
+# START COMMAND
 # =========================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("🚫 غير مصرح")
         return
     await update.message.reply_text(
-        "🎬 **بوت البث المباشر - الإدارة الكاملة**\nاختر من القائمة:",
+        "🎬 **بوت البث المباشر - الإدارة الكاملة**\n\n"
+        "📌 لإدارة بث موجود: أرسل اسمه أو اختر من القوائم.\n"
+        "➕ إضافة بث جديدة.\n"
+        "📺 HLS: بث لمتصفحات / أجهزة.\n"
+        "📡 RTMP: بث لـ YouTube / Facebook / Twitch.\n"
+        "⚙️ وضع الترميز: إعادة ترميز بجودة عالية.\n"
+        "🔄 وضع النسخ: بدون ترميز (أخف).\n"
+        "🖥 مراقبة السيرفر: حالة CPU, RAM, Disk.\n\n"
+        "استخدم الأزرار أدناه للتحكم:",
         reply_markup=main_kb
     )
 
 # =========================================
-# MAIN (FIXED)
+# MAIN
 # =========================================
 def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    # Start HTTP server and cleanup loop as background tasks
     loop.create_task(start_http())
     loop.create_task(clean_viewers_loop())
 
-    # Build and run bot
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
