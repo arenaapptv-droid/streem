@@ -33,7 +33,7 @@ BASE_URL = "http://164.68.102.28"
 STREAMS_FILE = "streams_pro.json"
 
 streams = {}
-panel_last_state = {}  # (chat_id, msg_id) -> (text, reply_markup)
+panel_last_state = {}
 viewer_last_seen = defaultdict(dict)
 
 def load_streams():
@@ -153,22 +153,24 @@ def get_system_status():
 
 monitor_tasks = {}
 
-async def start_monitor_live(update_or_query, chat_id=None, message_id=None):
+async def start_monitor_live(source, chat_id=None, message_id=None):
     """
-    يمكن استدعاؤها إما بـ:
-    - start_monitor_live(query, ...)  # من الكول باك
-    - start_monitor_live(update, chat_id, message_id) # من الرسالة
+    source يمكن أن يكون:
+    - CallbackQuery (من زر)
+    - Update (من رسالة نصية) مع تمرير chat_id و message_id
     """
-    # تحديد chat_id و message_id و bot بناءً على المدخلات
-    if chat_id is None and hasattr(update_or_query, 'message'):
-        # جاءت كـ CallbackQuery
-        q = update_or_query
+    if isinstance(source, Update):
+        # حالة الرسالة النصية: يجب تمرير chat_id و message_id
+        if chat_id is None or message_id is None:
+            logger.error("start_monitor_live from Update requires chat_id and message_id")
+            return
+        bot = source.bot
+    elif hasattr(source, 'message') and hasattr(source, 'bot'):
+        # حالة CallbackQuery
+        q = source
         chat_id = q.message.chat_id
         message_id = q.message.message_id
         bot = q.bot
-    elif chat_id and message_id and hasattr(update_or_query, 'bot'):
-        # جاءت كـ Update مع تحديد chat_id و message_id
-        bot = update_or_query.bot
     else:
         logger.error("Invalid parameters to start_monitor_live")
         return
@@ -332,7 +334,7 @@ async def update_panel_message(sid, bot):
         if "Message is not modified" not in str(e):
             logger.error(f"Panel update error for {sid}: {e}")
 
-# ========== منطق البث المحسّن (مقاوم للقطع) ==========
+# ========== منطق البث المحسّن ==========
 async def start_stream(sid, bot):
     s = streams[sid]
     src = s["source"]
@@ -345,13 +347,12 @@ async def start_stream(sid, bot):
     os.makedirs(out_dir, exist_ok=True)
     out_playlist = os.path.join(out_dir, "index.m3u8")
 
-    # معلمات ffmpeg الموحدة المقاومة للقطع
     input_opts = [
         "-re",
         "-user_agent", user_agent,
         "-reconnect", "1",
         "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "10",   # زيادة المهلة
+        "-reconnect_delay_max", "10",
         "-timeout", "10000000",
         "-rw_timeout", "10000000",
         "-fflags", "+genpts+discardcorrupt",
@@ -414,7 +415,6 @@ async def start_stream(sid, bot):
 
     retries = 3
     while s["active"]:
-        # تشغيل العملية
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -424,7 +424,6 @@ async def start_stream(sid, bot):
         s["source_online"] = True
         s["fallback"] = False
 
-        # قراءة stderr لاستخراج FPS والأخطاء
         async def read_stderr():
             try:
                 while True:
@@ -436,7 +435,6 @@ async def start_stream(sid, bot):
                         m = re.search(r"fps=\s*([\d.]+)", decoded)
                         if m:
                             s["last_fps"] = m.group(1)
-                    # تسجيل الأخطاء المهمة
                     if "error" in decoded.lower() or "failed" in decoded.lower():
                         logger.warning(f"Stream {sid} ffmpeg: {decoded}")
             except Exception as e:
@@ -444,31 +442,26 @@ async def start_stream(sid, bot):
 
         stderr_task = asyncio.create_task(read_stderr())
 
-        # حلقة تحديث اللوحة والتحقق من بقاء العملية
         while proc.returncode is None:
             clean_viewers()
             s["uptime"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
             await update_panel_message(sid, bot)
             await asyncio.sleep(5)
 
-        # انتهت العملية بشكل غير متوقع
         await proc.wait()
         stderr_task.cancel()
         s["source_online"] = False
         await update_panel_message(sid, bot)
 
-        # تسجيل سبب الخروج
-        logger.warning(f"Stream {sid} stopped unexpectedly. Return code: {proc.returncode}")
+        logger.warning(f"Stream {sid} stopped. Return code: {proc.returncode}")
 
-        # إعادة المحاولة إذا كان البث لا يزال نشطاً
         retries -= 1
         if retries > 0 and s["active"]:
             await asyncio.sleep(2)
             continue
 
-        # استخدام الفول باك إذا كان متاحاً
         if s["active"] and fallback_cmd:
-            logger.info(f"Starting fallback stream for {sid}")
+            logger.info(f"Starting fallback for {sid}")
             fallback_proc = await asyncio.create_subprocess_exec(
                 *fallback_cmd,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -478,8 +471,7 @@ async def start_stream(sid, bot):
             s["fallback"] = True
             s["source_online"] = False
             await update_panel_message(sid, bot)
-            await asyncio.sleep(20)  # مدة الفول باك
-            # إنهاء الفول باك بأمان
+            await asyncio.sleep(20)
             if fallback_proc.returncode is None:
                 try:
                     fallback_proc.kill()
@@ -490,7 +482,6 @@ async def start_stream(sid, bot):
         else:
             break
 
-    # تنظيف عند الخروج النهائي
     if s.get("process") and s["process"].returncode is None:
         try:
             s["process"].kill()
@@ -522,7 +513,6 @@ async def stop_stream(sid, bot):
     s["active"] = False
     s["source_online"] = False
     s["fallback"] = False
-    # حذف ملفات HLS
     stream_dir = os.path.join(HLS_DIR, sid)
     if os.path.exists(stream_dir):
         try:
@@ -673,7 +663,6 @@ async def msg_handler(update, context):
         return
     if text == "🖥 مراقبة":
         msg = await update.message.reply_text("⏳ جاري تحميل حالة السيرفر...")
-        # تمرير update نفسه و chat_id و message_id
         await start_monitor_live(update, chat_id=update.message.chat_id, message_id=msg.message_id)
         return
 
