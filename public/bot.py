@@ -251,7 +251,7 @@ def streams_inline_keyboard(stream_type):
     return InlineKeyboardMarkup(kb)
 
 # =========================================
-# FFMPEG STREAM
+# FFMPEG STREAM (FIXED FILTER)
 # =========================================
 async def start_stream(sid, bot):
     s = streams[sid]
@@ -274,26 +274,32 @@ async def start_stream(sid, bot):
 
     if mode == "copy":
         video_opts = ["-c:v", "copy"]
+        filter_complex = None
     else:
+        # video codec options (no -vf here)
         video_opts = [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
-            "-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease",
             "-g", "90",
             "-vsync", "cfr", "-r", "30"
         ]
+        if logo:
+            # add logo with scaling and overlay
+            filter_complex = "[1:v]scale=iw:ih[logo];[0:v][logo]overlay=0:0"
+        else:
+            # only resize if needed
+            filter_complex = f"[0:v]scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"
 
     audio_opts = ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
 
     if typ == "hls":
-        if logo and mode != "copy":
+        if filter_complex:
             cmd = [
                 "ffmpeg", "-re", "-user_agent", ua,
                 *reconnect_opts,
                 "-i", src,
-                "-i", logo,
-                "-filter_complex",
-                "[1:v][0:v]scale2ref=iw:ih[logo];[logo][ref]overlay=0:0",
+                "-i", logo if logo else src,
+                "-filter_complex", filter_complex,
                 *video_opts, *audio_opts,
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
                 "-hls_flags", "delete_segments", out_file
@@ -307,16 +313,15 @@ async def start_stream(sid, bot):
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
                 "-hls_flags", "delete_segments", out_file
             ]
-    else:
+    else:  # RTMP
         rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
-        if logo and mode != "copy":
+        if filter_complex:
             cmd = [
                 "ffmpeg", "-re", "-user_agent", ua,
                 *reconnect_opts,
                 "-i", src,
-                "-i", logo,
-                "-filter_complex",
-                "[1:v][0:v]scale2ref=iw:ih[logo];[logo][ref]overlay=0:0",
+                "-i", logo if logo else src,
+                "-filter_complex", filter_complex,
                 *video_opts, *audio_opts,
                 "-f", "flv", rtmp_url
             ]
@@ -329,6 +334,7 @@ async def start_stream(sid, bot):
                 "-f", "flv", rtmp_url
             ]
 
+    # kill previous process if exists
     if sid in processes:
         try:
             processes[sid].terminate()
