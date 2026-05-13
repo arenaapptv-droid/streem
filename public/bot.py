@@ -32,7 +32,6 @@ ADMIN_ID = cfg["ADMIN_ID"]
 BASE_URL = "http://164.68.102.28"
 PORT = 8080
 
-# إعدادات الترميز الموفرة
 VIDEO_BITRATE = cfg.get("VIDEO_BITRATE", "4000k")
 AUDIO_BITRATE = cfg.get("AUDIO_BITRATE", "128k")
 PRESET = cfg.get("PRESET", "ultrafast")
@@ -239,7 +238,7 @@ reply_kb = ReplyKeyboardMarkup([
 ], resize_keyboard=True)
 
 # =========================================
-# FFMPEG STREAM (Robust)
+# FFMPEG STREAM (Robust, low CPU, fullscreen logo)
 # =========================================
 async def run_ffmpeg(sid, bot):
     s = streams[sid]
@@ -249,14 +248,14 @@ async def run_ffmpeg(sid, bot):
     logo = s.get("logo", "")
     typ = s.get("type", "hls")
 
-    # Create stream directory with absolute path
+    # Clean stream directory
     stream_dir = os.path.join(HLS_DIR, sid)
     if os.path.exists(stream_dir):
         shutil.rmtree(stream_dir, ignore_errors=True)
     os.makedirs(stream_dir, exist_ok=True)
     out_file = os.path.join(stream_dir, "index.m3u8")
 
-    # Common options
+    # Common options for robustness
     base = [
         "ffmpeg", "-loglevel", "warning",
         "-re",
@@ -268,24 +267,33 @@ async def run_ffmpeg(sid, bot):
         "-i", src
     ]
 
+    # Video options
     if mode == "copy":
         video = ["-c:v", "copy"]
         filter_complex = None
+        use_logo = False
     else:
+        # Transcode with very low CPU usage
         video = [
             "-c:v", "libx264", "-preset", PRESET, "-crf", str(CRF),
-            "-b:v", VIDEO_BITRATE, "-threads", "2",
+            "-b:v", VIDEO_BITRATE, "-threads", "1",        # Use single thread to save CPU
             "-tune", "fastdecode"
         ]
-        # Scale only if necessary
-        filter_complex = "[0:v]scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"
+        # Scale to max 1080p
+        scale_filter = "[0:v]scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"
         if logo and len(logo) > 5:
-            filter_complex = f"[1:v]scale=120:-1[logo];[0:v]scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease[bg];[bg][logo]overlay=W-w-15:H-h-15"
+            # Full-screen logo using scale2ref (like Rplay Server)
+            filter_complex = f"[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0"
+            use_logo = True
+        else:
+            filter_complex = scale_filter
+            use_logo = False
 
     audio = ["-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ar", "44100", "-ac", "2"]
 
+    # Build command
     if typ == "hls":
-        if filter_complex and logo and len(logo) > 5:
+        if use_logo:
             cmd = base + ["-i", logo, "-filter_complex", filter_complex] + video + audio + [
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
                 "-hls_flags", "delete_segments", "-y", out_file
@@ -302,7 +310,7 @@ async def run_ffmpeg(sid, bot):
             ]
     else:  # RTMP
         rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
-        if filter_complex and logo and len(logo) > 5:
+        if use_logo:
             cmd = base + ["-i", logo, "-filter_complex", filter_complex] + video + audio + ["-f", "flv", "-y", rtmp_url]
         elif filter_complex:
             cmd = base + ["-filter_complex", filter_complex] + video + audio + ["-f", "flv", "-y", rtmp_url]
@@ -318,6 +326,8 @@ async def run_ffmpeg(sid, bot):
         except: pass
         processes.pop(sid, None)
 
+    print(f"[{sid}] Starting with command: {' '.join(cmd[:20])}...")
+
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.DEVNULL,
@@ -329,8 +339,7 @@ async def run_ffmpeg(sid, bot):
     save_streams()
     await update_panel(sid, bot)
 
-    # Read stderr for fps info
-    async def read_stderr():
+    async def stderr_reader():
         while True:
             line = await proc.stderr.readline()
             if not line:
@@ -342,9 +351,9 @@ async def run_ffmpeg(sid, bot):
                 await update_panel(sid, bot)
             if "error" in txt.lower():
                 print(f"[{sid}] ffmpeg: {txt}")
-    asyncio.create_task(read_stderr())
+    asyncio.create_task(stderr_reader())
 
-    # Wait for process to finish
+    # Wait for process to finish (it will run until stopped or error)
     await proc.wait()
     s["active"] = False
     processes.pop(sid, None)
@@ -614,14 +623,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ HLS directory cleaned")
         return
 
+    # ADD STREAM: name
     if context.user_data.get("step") == "add_name":
         name = text.strip()
+        # Generate sid: replace spaces with underscores, keep original characters
         base_sid = name.replace(" ", "_")
-        sid = base_sid
-        counter = 1
-        while sid in streams:
+        # Ensure sid is unique without adding random numbers unless necessary
+        if base_sid not in streams:
+            sid = base_sid
+        else:
+            counter = 1
+            while f"{base_sid}_{counter}" in streams:
+                counter += 1
             sid = f"{base_sid}_{counter}"
-            counter += 1
         streams[sid] = {
             "name": name,
             "source": "",
@@ -643,6 +657,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📥 Send source URL:")
         return
 
+    # ADD STREAM: source
     if context.user_data.get("step") == "add_source":
         sid = context.user_data.get("sid")
         if sid in streams:
@@ -659,6 +674,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Error")
         return
 
+    # EDIT stream parameters
     if context.user_data.get("edit"):
         typ, sid, edit_chat_id, edit_msg_id = context.user_data["edit"]
         s = streams.get(sid)
