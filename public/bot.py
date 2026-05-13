@@ -1,530 +1,433 @@
 import asyncio
 import json
 import os
-import time
+import re
 import shutil
+import time
+import signal
+from collections import defaultdict
+
 from aiohttp import web
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    filters,
-    ContextTypes
+    ContextTypes,
+    filters
 )
 
-# ========== الإعدادات ==========
+# =========================================
+# OPTIONAL PSUTIL
+# =========================================
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except:
+    PSUTIL_AVAILABLE = False
+
+
+# =========================================
+# CONFIG
+# =========================================
 with open("settings.json") as f:
     cfg = json.load(f)
 
 TOKEN = cfg["TOKEN"]
 ADMIN_ID = cfg["ADMIN_ID"]
 
-HLS_DIR = "/tmp/hls"
-os.makedirs(HLS_DIR, exist_ok=True)
-
+BASE_URL = cfg.get("BASE_URL", "http://127.0.0.1")
 PORT = 8080
-BASE_URL = "http://164.68.102.28"
 
+HLS_DIR = "/tmp/hls"
 STREAMS_FILE = "streams.json"
+
+os.makedirs(HLS_DIR, exist_ok=True)
 
 streams = {}
 processes = {}
 
+# viewers
+viewers = defaultdict(set)
+viewer_last = defaultdict(dict)
+
+# locks (مهم جدًا لمنع تشغيل مزدوج)
+stream_locks = defaultdict(asyncio.Lock)
+
+
+# =========================================
+# LOAD STREAMS
+# =========================================
 if os.path.exists(STREAMS_FILE):
     with open(STREAMS_FILE) as f:
         streams = json.load(f)
 
 
+# =========================================
+# SAVE STREAMS
+# =========================================
 def save_streams():
     with open(STREAMS_FILE, "w") as f:
         json.dump(streams, f, indent=2)
 
 
-# ========== الكيبورد ==========
+# =========================================
+# KEYBOARD
+# =========================================
 reply_kb = ReplyKeyboardMarkup([
     ["📺 قائمة HLS", "📡 قائمة RTMP"],
-    ["➕ إضافة بث", "🖥 حالة السيرفر"]
+    ["➕ إضافة بث", "🖥 مراقبة السيرفر"],
+    ["♻️ إعادة تشغيل", "🧹 تنظيف"]
 ], resize_keyboard=True)
 
 
-# ========== HTTP SERVER ==========
+# =========================================
+# VIEWERS TRACKING
+# =========================================
+async def track_viewer(request, sid):
+    ip = request.headers.get("X-Forwarded-For", request.remote)
+    if not ip:
+        return
+    now = time.time()
+    viewers[sid].add(ip)
+    viewer_last[sid][ip] = now
+
+
+def clean_viewers():
+    now = time.time()
+    for sid in list(viewers.keys()):
+        for ip in list(viewers[sid]):
+            if now - viewer_last[sid].get(ip, 0) > 15:
+                viewers[sid].discard(ip)
+                viewer_last[sid].pop(ip, None)
+
+
+async def clean_viewers_loop():
+    while True:
+        clean_viewers()
+        await asyncio.sleep(10)
+
+
+# =========================================
+# HTTP SERVER
+# =========================================
 async def hls_handler(request):
-    name = request.match_info["name"]
+    sid = request.match_info["name"]
     filename = request.match_info.get("file", "index.m3u8")
 
-    path = os.path.join(HLS_DIR, name, filename)
+    path = os.path.join(HLS_DIR, sid, filename)
 
     if not os.path.exists(path):
         return web.Response(status=404)
+
+    await track_viewer(request, sid)
 
     return web.FileResponse(path)
 
 
 async def start_http():
     app = web.Application()
-
-    app.router.add_get(
-        "/live/{name}/{file:.*}",
-        hls_handler
-    )
+    app.router.add_get("/live/{name}/{file:.*}", hls_handler)
 
     runner = web.AppRunner(app)
-
     await runner.setup()
 
-    site = web.TCPSite(
-        runner,
-        "0.0.0.0",
-        PORT
-    )
-
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
 
-    print(f"HTTP server started on {PORT}")
+    print(f"HTTP SERVER RUNNING ON {PORT}")
 
 
-# ========== START ==========
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================================
+# SERVER STATUS
+# =========================================
+def server_status():
+    if not PSUTIL_AVAILABLE:
+        return "psutil غير مثبت"
+
+    cpu = psutil.cpu_percent()
+    ram = psutil.virtual_memory()
+    disk = psutil.disk_usage("/")
+    net = psutil.net_io_counters()
+
+    return (
+        f"🖥 CPU: {cpu}%\n"
+        f"🧠 RAM: {ram.percent}%\n"
+        f"💾 DISK: {disk.percent}%\n"
+        f"📤 OUT: {net.bytes_sent//1024//1024}MB\n"
+        f"📥 IN: {net.bytes_recv//1024//1024}MB\n"
+        f"📺 STREAMS: {len(streams)}"
+    )
+
+
+# =========================================
+# START
+# =========================================
+async def start(update: Update, context):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("غير مصرح")
         return
 
     await update.message.reply_text(
-        "🎬 بوت البث المباشر\nاختر من القائمة:",
+        "🎬 نظام البث المباشر",
         reply_markup=reply_kb
     )
 
 
-# ========== لوحة التحكم ==========
+# =========================================
+# PANEL
+# =========================================
 async def show_panel(update, sid, context):
-    s = streams.get(sid)
+    s = streams[sid]
 
-    if not s:
-        await update.message.reply_text("البث غير موجود")
-        return
+    uptime = "00:00:00"
+    if s.get("start_time"):
+        uptime = time.strftime(
+            "%H:%M:%S",
+            time.gmtime(time.time() - s["start_time"])
+        )
 
     txt = (
-        f"🎛️ {s['name']}\n\n"
+        f"🎛 {s['name']}\n\n"
         f"📥 المصدر:\n{s['source']}\n\n"
-        f"⚙️ الوضع: "
-        f"{'نسخ مباشر' if s['mode']=='copy' else 'ترميز'}\n"
-        f"🟢 الحالة: "
-        f"{'يعمل' if s.get('active') else 'متوقف'}\n\n"
+        f"⚙️ الوضع: {s['mode']}\n"
+        f"🟢 الحالة: {'يعمل' if s.get('active') else 'متوقف'}\n"
+        f"🎬 FPS: {s.get('fps','?')}\n"
+        f"👥 المشاهدين: {len(viewers[sid])}\n"
+        f"⏱ التشغيل: {uptime}\n\n"
+        f"🔗 {BASE_URL}:{PORT}/live/{sid}/index.m3u8"
     )
-
-    if s["type"] == "hls":
-        txt += (
-            f"🔗 رابط المشاهدة:\n"
-            f"{BASE_URL}:{PORT}/live/{sid}/index.m3u8"
-        )
 
     kb = ReplyKeyboardMarkup([
         ["▶️ تشغيل", "⏹ إيقاف"],
+        ["📥 تغيير المصدر", "🖼 تغيير الشعار"],
+        ["🕵️ تغيير UA", "✏️ إعادة تسمية"],
         ["🔄 تبديل الوضع", "🗑 حذف البث"],
         ["🔙 القائمة الرئيسية"]
     ], resize_keyboard=True)
 
     context.user_data["current_sid"] = sid
-
-    await update.message.reply_text(
-        txt,
-        reply_markup=kb
-    )
+    await update.message.reply_text(txt, reply_markup=kb)
 
 
-# ========== تشغيل البث ==========
+# =========================================
+# START STREAM (FIXED)
+# =========================================
 async def start_stream(sid, chat_id, bot):
-    s = streams[sid]
+    async with stream_locks[sid]:
 
-    src = s["source"]
-    mode = s.get("mode", "copy")
-    ua = s.get("ua", "ExoPlayerLib/2.18.5")
+        s = streams[sid]
+        src = s["source"]
 
-    out_dir = os.path.join(HLS_DIR, sid)
+        if not src.startswith(("http://", "https://", "rtmp://")):
+            return
 
-    os.makedirs(out_dir, exist_ok=True)
+        mode = s.get("mode", "copy")
+        ua = s.get("ua", "ExoPlayer")
 
-    out_file = os.path.join(
-        out_dir,
-        "index.m3u8"
-    )
+        logo = s.get("logo", "")
 
-    base_cmd = [
-        "ffmpeg",
-        "-re",
-        "-user_agent", ua,
+        out_dir = os.path.join(HLS_DIR, sid)
+        os.makedirs(out_dir, exist_ok=True)
 
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "10",
+        out_file = os.path.join(out_dir, "index.m3u8")
 
-        "-fflags", "+genpts+discardcorrupt",
-        "-err_detect", "ignore_err",
+        base = [
+            "ffmpeg",
 
-        "-i", src
-    ]
+            "-threads", "2",
+            "-async", "1",
+            "-vsync", "1",
 
-    if mode == "copy":
-        video_opts = [
-            "-c:v", "copy"
-        ]
-    else:
-        video_opts = [
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "23",
-            "-g", "50"
+            "-user_agent", ua,
+
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "10",
+
+            "-fflags", "+genpts+discardcorrupt",
+            "-err_detect", "ignore_err",
+            "-avoid_negative_ts", "make_zero",
+            "-max_muxing_queue_size", "4096",
+
+            "-i", src
         ]
 
-    audio_opts = [
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-ar", "44100",
-        "-ac", "2"
-    ]
+        if mode == "copy":
+            video = ["-c:v", "copy"]
+        else:
+            video = [
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "23",
+                "-g", "50"
+            ]
 
-    cmd = (
-        base_cmd
-        + video_opts
-        + audio_opts
-        + [
-            "-f", "hls",
-
-            "-hls_time", "2",
-            "-hls_list_size", "5",
-
-            "-hls_flags",
-            "delete_segments+append_list",
-
-            out_file
+        audio = [
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-ar", "44100",
+            "-ac", "2"
         ]
-    )
 
-    print(" ".join(cmd))
+        if logo and mode != "copy":
+            cmd = base + [
+                "-i", logo,
+                "-filter_complex",
+                "[1:v]scale=120:-1[logo];[0:v][logo]overlay=10:10"
+            ] + video + audio + [
+                "-f", "hls",
+                "-hls_time", "2",
+                "-hls_list_size", "5",
+                "-hls_flags", "delete_segments+append_list+omit_endlist",
+                out_file
+            ]
+        else:
+            cmd = base + video + audio + [
+                "-f", "hls",
+                "-hls_time", "2",
+                "-hls_list_size", "5",
+                "-hls_flags", "delete_segments+append_list+omit_endlist",
+                out_file
+            ]
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE
-    )
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE
+        )
 
-    processes[sid] = proc
+        processes[sid] = proc
+        s["start_time"] = time.time()
+        s["active"] = True
+        save_streams()
 
-    streams[sid]["active"] = True
-    save_streams()
+        async def log_reader():
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
 
-    async def read_logs():
-        while True:
-            line = await proc.stderr.readline()
+                txt = line.decode(errors="ignore")
 
-            if not line:
-                break
+                m = re.search(r"fps=\s*([\d.]+)", txt)
+                if m:
+                    s["fps"] = m.group(1)
 
-            txt = line.decode(
-                errors="ignore"
-            ).strip()
+        asyncio.create_task(log_reader())
 
-            if "error" in txt.lower():
-                print(f"[{sid}] {txt}")
+        await proc.wait()
 
-    asyncio.create_task(read_logs())
+        processes.pop(sid, None)
+        s["active"] = False
+        save_streams()
 
-    await proc.wait()
-
-    streams[sid]["active"] = False
-
-    processes.pop(sid, None)
-
-    save_streams()
-
-    await bot.send_message(
-        chat_id,
-        f"⛔ توقف بث {s['name']}"
-    )
+        await bot.send_message(chat_id, f"⛔ توقف {s['name']}")
 
 
-# ========== إيقاف البث ==========
+# =========================================
+# STOP STREAM (FIXED)
+# =========================================
 async def stop_stream(sid):
     if sid in processes:
+        proc = processes[sid]
+
+        proc.terminate()
+
         try:
-            processes[sid].terminate()
-
-            await asyncio.sleep(1)
-
-            processes[sid].kill()
-
+            await asyncio.wait_for(proc.wait(), timeout=5)
         except:
-            pass
+            proc.kill()
 
         processes.pop(sid, None)
 
     if sid in streams:
         streams[sid]["active"] = False
 
+    viewers.pop(sid, None)
+    viewer_last.pop(sid, None)
+
     save_streams()
 
-    hls_path = os.path.join(HLS_DIR, sid)
-
-    if os.path.exists(hls_path):
-        shutil.rmtree(
-            hls_path,
-            ignore_errors=True
-        )
+    shutil.rmtree(os.path.join(HLS_DIR, sid), ignore_errors=True)
 
 
-# ========== الرسائل ==========
-async def handle_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+# =========================================
+# CLEANUP
+# =========================================
+async def cleanup_hls():
+    while True:
+        now = time.time()
+
+        for sid in os.listdir(HLS_DIR):
+            path = os.path.join(HLS_DIR, sid)
+
+            if os.path.isdir(path):
+                if now - os.path.getmtime(path) > 3600:
+                    shutil.rmtree(path, ignore_errors=True)
+
+        await asyncio.sleep(600)
+
+
+async def cleanup_dead():
+    while True:
+        for sid in list(processes.keys()):
+            if processes[sid].returncode is not None:
+                processes.pop(sid, None)
+        await asyncio.sleep(10)
+
+
+# =========================================
+# HANDLE MESSAGES
+# =========================================
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     if update.effective_user.id != ADMIN_ID:
         return
 
     text = update.message.text
+    chat_id = update.effective_chat.id
 
-    # ===== قائمة HLS =====
-    if text == "📺 قائمة HLS":
-        msg = "📺 قائمة HLS:\n\n"
-
-        found = False
-
-        for sid, s in streams.items():
-            if s["type"] == "hls":
-                found = True
-
-                status = (
-                    "🟢"
-                    if s.get("active")
-                    else "🔴"
-                )
-
-                msg += f"{status} {s['name']}\n"
-
-        if not found:
-            msg = "لا توجد بثوث HLS"
-
-        await update.message.reply_text(msg)
-
-    # ===== قائمة RTMP =====
-    elif text == "📡 قائمة RTMP":
-        msg = "📡 قائمة RTMP:\n\n"
-
-        found = False
-
-        for sid, s in streams.items():
-            if s["type"] == "rtmp":
-                found = True
-
-                status = (
-                    "🟢"
-                    if s.get("active")
-                    else "🔴"
-                )
-
-                msg += f"{status} {s['name']}\n"
-
-        if not found:
-            msg = "لا توجد بثوث RTMP"
-
-        await update.message.reply_text(msg)
-
-    # ===== إضافة بث =====
-    elif text == "➕ إضافة بث":
-        context.user_data["step"] = "wait_name"
-
-        await update.message.reply_text(
-            "أرسل اسم البث:"
-        )
-
-    # ===== حالة السيرفر =====
-    elif text == "🖥 حالة السيرفر":
-        load = "غير معروف"
-
-        try:
-            with open("/proc/loadavg") as f:
-                load = f.read().split()[0]
-        except:
-            pass
-
-        await update.message.reply_text(
-            f"🖥 الحمل: {load}\n"
-            f"📡 عدد البثوث: {len(streams)}"
-        )
-
-    # ===== اسم البث =====
-    elif context.user_data.get("step") == "wait_name":
-        name = text.strip()
-
-        sid = (
-            name.replace(" ", "_")
-            + str(int(time.time()))
-        )
-
-        streams[sid] = {
-            "name": name,
-            "source": "",
-            "type": "hls",
-            "mode": "copy",
-            "active": False,
-            "ua": "ExoPlayerLib/2.18.5"
-        }
-
-        save_streams()
-
-        context.user_data["step"] = "wait_source"
-        context.user_data["sid"] = sid
-
-        await update.message.reply_text(
-            "أرسل رابط المصدر:"
-        )
-
-    # ===== رابط المصدر =====
-    elif context.user_data.get("step") == "wait_source":
-        sid = context.user_data.get("sid")
-
-        if sid and sid in streams:
-            streams[sid]["source"] = text
-
-            save_streams()
-
-            context.user_data["step"] = None
-
-            await update.message.reply_text(
-                f"✅ تم حفظ البث\n\n"
-                f"🔗 رابط المشاهدة:\n"
-                f"{BASE_URL}:{PORT}/live/{sid}/index.m3u8"
-            )
-
-    # ===== تشغيل =====
-    elif text == "▶️ تشغيل":
+    if text == "▶️ تشغيل":
         sid = context.user_data.get("current_sid")
+        if sid:
+            streams[sid]["active"] = True
+            asyncio.create_task(start_stream(sid, chat_id, context.bot))
 
-        if not sid:
-            await update.message.reply_text(
-                "اختر بث أولاً"
-            )
-            return
-
-        if streams[sid].get("active"):
-            await update.message.reply_text(
-                "البث يعمل بالفعل"
-            )
-            return
-
-        asyncio.create_task(
-            start_stream(
-                sid,
-                update.effective_chat.id,
-                context.bot
-            )
-        )
-
-        await update.message.reply_text(
-            "▶️ جاري تشغيل البث"
-        )
-
-    # ===== إيقاف =====
     elif text == "⏹ إيقاف":
         sid = context.user_data.get("current_sid")
+        if sid:
+            await stop_stream(sid)
 
-        if not sid:
-            return
+    elif text == "🧹 تنظيف":
+        shutil.rmtree(HLS_DIR, ignore_errors=True)
+        os.makedirs(HLS_DIR, exist_ok=True)
 
-        await stop_stream(sid)
-
-        await update.message.reply_text(
-            "⏹ تم إيقاف البث"
-        )
-
-    # ===== تبديل الوضع =====
-    elif text == "🔄 تبديل الوضع":
-        sid = context.user_data.get("current_sid")
-
-        if not sid:
-            return
-
-        streams[sid]["mode"] = (
-            "encode"
-            if streams[sid]["mode"] == "copy"
-            else "copy"
-        )
-
-        save_streams()
-
-        await update.message.reply_text(
-            f"⚙️ الوضع الحالي: "
-            f"{streams[sid]['mode']}"
-        )
-
-    # ===== حذف =====
-    elif text == "🗑 حذف البث":
-        sid = context.user_data.get("current_sid")
-
-        if not sid:
-            return
-
-        await stop_stream(sid)
-
-        streams.pop(sid, None)
-
-        save_streams()
-
-        await update.message.reply_text(
-            "🗑 تم حذف البث",
-            reply_markup=reply_kb
-        )
-
-    # ===== رجوع =====
-    elif text == "🔙 القائمة الرئيسية":
-        await update.message.reply_text(
-            "القائمة الرئيسية",
-            reply_markup=reply_kb
-        )
-
-    # ===== فتح لوحة بث =====
-    else:
-        for sid, s in streams.items():
-            if s["name"] == text:
-                await show_panel(
-                    update,
-                    sid,
-                    context
-                )
-                return
-
-        await update.message.reply_text(
-            "استخدم الأزرار المتاحة"
-        )
+    elif text == "♻️ إعادة تشغيل":
+        for sid in streams:
+            if streams[sid].get("active"):
+                await stop_stream(sid)
+                streams[sid]["active"] = True
+                asyncio.create_task(start_stream(sid, chat_id, context.bot))
 
 
-# ========== MAIN ==========
+# =========================================
+# MAIN FIXED
+# =========================================
 async def main():
     await start_http()
 
+    asyncio.create_task(clean_viewers_loop())
+    asyncio.create_task(cleanup_dead())
+    asyncio.create_task(cleanup_hls())
+
     app = Application.builder().token(TOKEN).build()
 
-    app.add_handler(
-        CommandHandler("start", start)
-    )
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message
-        )
-    )
+    print("BOT STARTED")
 
-    print("Bot started...")
-
-    await app.initialize()
-
-    await app.start()
-
-    await app.updater.start_polling()
-
-    while True:
-        await asyncio.sleep(3600)
+    await app.run_polling()
 
 
 if __name__ == "__main__":
