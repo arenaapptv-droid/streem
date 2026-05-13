@@ -48,8 +48,6 @@ processes = {}
 viewers = defaultdict(set)
 viewer_last = defaultdict(dict)
 
-stream_message_ids = {}
-
 monitor_active = False
 monitor_task = None
 monitor_chat_id = None
@@ -249,7 +247,7 @@ def streams_inline_keyboard(stream_type):
     return InlineKeyboardMarkup(kb)
 
 # =========================================
-# FFMPEG STREAM (FIXED FILTER - COVER FULL SCREEN)
+# FFMPEG STREAM
 # =========================================
 async def start_stream(sid, bot):
     s = streams[sid]
@@ -280,7 +278,7 @@ async def start_stream(sid, bot):
             "-g", "90",
             "-vsync", "cfr", "-r", "30"
         ]
-        if logo:
+        if logo and os.path.exists(logo):
             filter_complex = "[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0"
         else:
             filter_complex = "[0:v]scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"
@@ -288,7 +286,7 @@ async def start_stream(sid, bot):
     audio_opts = ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
 
     if typ == "hls":
-        if filter_complex:
+        if filter_complex and logo and os.path.exists(logo):
             cmd = [
                 "ffmpeg", "-re", "-user_agent", ua,
                 *reconnect_opts,
@@ -310,7 +308,7 @@ async def start_stream(sid, bot):
             ]
     else:
         rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
-        if filter_complex:
+        if filter_complex and logo and os.path.exists(logo):
             cmd = [
                 "ffmpeg", "-re", "-user_agent", ua,
                 *reconnect_opts,
@@ -362,7 +360,6 @@ async def start_stream(sid, bot):
                 print(f"[{sid}] ffmpeg: {txt}")
     asyncio.create_task(stderr_reader())
 
-    # تحديث اللوحة بفاصل متصاعد (يبدأ 5 ثوانٍ حتى يصل 300 ثانية)
     interval = 5
     max_interval = 300
     stable_cycles = 0
@@ -398,7 +395,7 @@ async def stop_stream(sid, bot):
     await update_stream_message(sid, bot)
 
 # =========================================
-# MONITOR SERVER (UPDATE EVERY 3 SEC)
+# MONITOR SERVER
 # =========================================
 async def monitor_loop(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id, message_id):
     global monitor_active
@@ -417,7 +414,8 @@ async def monitor_loop(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_
                 parse_mode="Markdown"
             )
         except Exception as e:
-            print(f"Monitor edit error: {e}")
+            if "Message is not modified" not in str(e):
+                print(f"Monitor edit error: {e}")
         await asyncio.sleep(3)
     try:
         await context.bot.edit_message_text(
@@ -429,9 +427,6 @@ async def monitor_loop(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_
         )
     except: pass
 
-# =========================================
-# INLINE MAIN MENU (for editing)
-# =========================================
 def inline_main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📺 قائمة HLS", callback_data="list_hls")],
@@ -441,9 +436,6 @@ def inline_main_menu():
         [InlineKeyboardButton("🧹 تنظيف الملفات", callback_data="clean_files")]
     ])
 
-# =========================================
-# REPLY KEYBOARD (for start command)
-# =========================================
 reply_kb = ReplyKeyboardMarkup([
     ["📺 قائمة HLS", "📡 قائمة RTMP"],
     ["➕ إضافة بث", "🖥 مراقبة السيرفر"],
@@ -616,10 +608,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if sid in streams:
             streams.pop(sid, None)
             save_streams()
-        await query.edit_message_text(
-            "🗑 تم حذف البث",
-            reply_markup=inline_main_menu()
-        )
+        await query.edit_message_text("🗑 تم حذف البث", reply_markup=inline_main_menu())
         return
 
     await query.answer("لا شيء")
@@ -633,7 +622,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
-    chat_id = update.effective_chat.id
 
     if text == "📺 قائمة HLS":
         await update.message.reply_text("📺 بثوث HLS:", reply_markup=streams_inline_keyboard("hls"))
@@ -663,11 +651,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ تم تنظيف مجلد HLS")
         return
 
-    # إضافة بث جديد مع اسم sid بسيط
     if context.user_data.get("step") == "add_name":
         name = text.strip()
         base_sid = name.replace(" ", "_")
-        # تجنب التكرار دون استخدام timestamp
         if base_sid not in streams:
             sid = base_sid
         else:
@@ -711,7 +697,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ خطأ")
         return
 
-    # تعديل البيانات
     if context.user_data.get("edit"):
         typ, sid, edit_chat_id, edit_msg_id = context.user_data["edit"]
         if typ == "source":
@@ -742,7 +727,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    _, sid, typ = query.data.split("_")
+    parts = query.data.split("_", 2)
+    if len(parts) != 3:
+        await query.edit_message_text("❌ خطأ في البيانات")
+        return
+    _, sid, typ = parts
     if sid in streams:
         streams[sid]["type"] = typ
         if typ == "rtmp":
