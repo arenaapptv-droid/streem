@@ -16,6 +16,7 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
+from telegram.error import BadRequest
 
 # =========================================
 # PSUTIL (optional)
@@ -443,12 +444,41 @@ reply_kb = ReplyKeyboardMarkup([
 ], resize_keyboard=True)
 
 # =========================================
+# SAFE ANSWER FUNCTION
+# =========================================
+async def safe_answer(query, text=None, show_alert=False):
+    try:
+        if text:
+            await query.answer(text, show_alert=show_alert)
+        else:
+            await query.answer()
+    except BadRequest as e:
+        if "Query is too old" in str(e) or "query id is invalid" in str(e):
+            pass
+        else:
+            print(f"Answer error: {e}")
+    except Exception as e:
+        print(f"Answer error: {e}")
+
+async def safe_edit(query, text, reply_markup=None, parse_mode=None):
+    try:
+        if reply_markup:
+            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        else:
+            await query.edit_message_text(text, parse_mode=parse_mode)
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            print(f"Edit error: {e}")
+    except Exception as e:
+        print(f"Edit error: {e}")
+
+# =========================================
 # CALLBACK HANDLER
 # =========================================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global monitor_active, monitor_task, monitor_chat_id, monitor_msg_id
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     data = query.data
     chat_id = query.message.chat_id
     message_id = query.message.message_id
@@ -458,7 +488,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             monitor_active = False
             if monitor_task:
                 monitor_task.cancel()
-        await query.edit_message_text("🎬 القائمة الرئيسية", reply_markup=inline_main_menu())
+        await safe_edit(query, "🎬 القائمة الرئيسية", reply_markup=inline_main_menu())
         return
 
     if data == "stop_monitor":
@@ -466,19 +496,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             monitor_active = False
             if monitor_task:
                 monitor_task.cancel()
-        await query.edit_message_text(system_status(), reply_markup=inline_main_menu(), parse_mode="Markdown")
+        await safe_edit(query, system_status(), reply_markup=inline_main_menu(), parse_mode="Markdown")
         return
 
     if data == "list_hls":
-        await query.edit_message_text("📺 بثوث HLS:", reply_markup=streams_inline_keyboard("hls"))
+        await safe_edit(query, "📺 بثوث HLS:", reply_markup=streams_inline_keyboard("hls"))
         return
     if data == "list_rtmp":
-        await query.edit_message_text("📡 بثوث RTMP:", reply_markup=streams_inline_keyboard("rtmp"))
+        await safe_edit(query, "📡 بثوث RTMP:", reply_markup=streams_inline_keyboard("rtmp"))
         return
 
     if data == "add_stream":
         context.user_data["step"] = "add_name"
-        await query.edit_message_text("📝 أرسل اسم البث الجديد:")
+        await safe_edit(query, "📝 أرسل اسم البث الجديد:")
         return
 
     if data == "monitor_server":
@@ -487,7 +517,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if monitor_task:
                 monitor_task.cancel()
             try:
-                await query.edit_message_text(system_status(), reply_markup=inline_main_menu(), parse_mode="Markdown")
+                await safe_edit(query, system_status(), reply_markup=inline_main_menu(), parse_mode="Markdown")
             except:
                 pass
             return
@@ -496,7 +526,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⏹ إيقاف المراقبة", callback_data="stop_monitor")],
             [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")]
         ])
-        await query.edit_message_text(status_text, reply_markup=kb, parse_mode="Markdown")
+        await safe_edit(query, status_text, reply_markup=kb, parse_mode="Markdown")
         monitor_chat_id = chat_id
         monitor_msg_id = message_id
         monitor_active = True
@@ -506,7 +536,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "clean_files":
         shutil.rmtree(HLS_DIR, ignore_errors=True)
         os.makedirs(HLS_DIR, exist_ok=True)
-        await query.edit_message_text("✅ تم تنظيف مجلد HLS", reply_markup=inline_main_menu())
+        await safe_edit(query, "✅ تم تنظيف مجلد HLS", reply_markup=inline_main_menu())
         return
 
     if data.startswith("open_"):
@@ -516,13 +546,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             streams[sid]["message_id"] = message_id
             save_streams()
             text = get_panel_text(sid)
-            await query.edit_message_text(
-                text,
-                reply_markup=stream_panel_keyboard(sid, streams[sid]),
-                parse_mode="Markdown"
-            )
+            await safe_edit(query, text, reply_markup=stream_panel_keyboard(sid, streams[sid]), parse_mode="Markdown")
         else:
-            await query.edit_message_text("❌ البث غير موجود")
+            await safe_edit(query, "❌ البث غير موجود")
         return
 
     if data.startswith("start_"):
@@ -530,60 +556,60 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if sid in streams:
             s = streams[sid]
             if not s.get("source"):
-                await query.answer("❌ لا يوجد مصدر!", show_alert=True)
+                await safe_answer(query, "❌ لا يوجد مصدر!", show_alert=True)
                 return
             if s["type"] == "rtmp" and (not s.get("rtmp_server") or not s.get("rtmp_key")):
-                await query.answer("❌ إعدادات RTMP غير مكتملة!", show_alert=True)
+                await safe_answer(query, "❌ إعدادات RTMP غير مكتملة!", show_alert=True)
                 return
             if s.get("active"):
-                await query.answer("⚠️ البث يعمل بالفعل", show_alert=True)
+                await safe_answer(query, "⚠️ البث يعمل بالفعل", show_alert=True)
                 return
-            await query.answer("⏳ جاري التشغيل...")
+            await safe_answer(query, "⏳ جاري التشغيل...")
             asyncio.create_task(start_stream(sid, context.bot))
         else:
-            await query.answer("❌ خطأ")
+            await safe_answer(query, "❌ خطأ", show_alert=True)
         return
 
     if data.startswith("stop_"):
         sid = data[5:]
-        await query.answer("⏹ تم الإيقاف")
+        await safe_answer(query, "⏹ تم الإيقاف")
         asyncio.create_task(stop_stream(sid, context.bot))
         return
 
     if data.startswith("source_"):
         sid = data[7:]
         context.user_data["edit"] = ("source", sid, chat_id, message_id)
-        await query.edit_message_text("📥 أرسل رابط المصدر الجديد:")
+        await safe_edit(query, "📥 أرسل رابط المصدر الجديد:")
         return
 
     if data.startswith("logo_"):
         sid = data[5:]
         context.user_data["edit"] = ("logo", sid, chat_id, message_id)
-        await query.edit_message_text("🖼 أرسل رابط الشعار (أو /skip):")
+        await safe_edit(query, "🖼 أرسل رابط الشعار (أو /skip):")
         return
 
     if data.startswith("ua_"):
         sid = data[3:]
         context.user_data["edit"] = ("ua", sid, chat_id, message_id)
-        await query.edit_message_text("🕵️ أرسل User-Agent (أو /skip):")
+        await safe_edit(query, "🕵️ أرسل User-Agent (أو /skip):")
         return
 
     if data.startswith("rename_"):
         sid = data[7:]
         context.user_data["edit"] = ("rename", sid, chat_id, message_id)
-        await query.edit_message_text("✏️ أرسل الاسم الجديد:")
+        await safe_edit(query, "✏️ أرسل الاسم الجديد:")
         return
 
     if data.startswith("rtmpsrv_"):
         sid = data[8:]
         context.user_data["edit"] = ("rtmp_server", sid, chat_id, message_id)
-        await query.edit_message_text("📡 أرسل خادم RTMP (مثال: rtmp://live.twitch.tv/app):")
+        await safe_edit(query, "📡 أرسل خادم RTMP (مثال: rtmp://live.twitch.tv/app):")
         return
 
     if data.startswith("rtmpkey_"):
         sid = data[8:]
         context.user_data["edit"] = ("rtmp_key", sid, chat_id, message_id)
-        await query.edit_message_text("🔑 أرسل مفتاح البث (stream key):")
+        await safe_edit(query, "🔑 أرسل مفتاح البث (stream key):")
         return
 
     if data.startswith("mode_"):
@@ -592,14 +618,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             old = streams[sid]["mode"]
             streams[sid]["mode"] = "encode" if old == "copy" else "copy"
             save_streams()
-            await query.answer(f"✅ تم التبديل إلى {'ترميز' if streams[sid]['mode']=='encode' else 'نسخ'}")
+            await safe_answer(query, f"✅ تم التبديل إلى {'ترميز' if streams[sid]['mode']=='encode' else 'نسخ'}")
             if streams[sid].get("active"):
                 await stop_stream(sid, context.bot)
                 asyncio.create_task(start_stream(sid, context.bot))
             else:
                 await update_stream_message(sid, context.bot)
         else:
-            await query.answer("❌ خطأ")
+            await safe_answer(query, "❌ خطأ", show_alert=True)
         return
 
     if data.startswith("del_"):
@@ -608,10 +634,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if sid in streams:
             streams.pop(sid, None)
             save_streams()
-        await query.edit_message_text("🗑 تم حذف البث", reply_markup=inline_main_menu())
+        await safe_edit(query, "🗑 تم حذف البث", reply_markup=inline_main_menu())
         return
-
-    await query.answer("لا شيء")
 
 # =========================================
 # TEXT MESSAGE HANDLER
@@ -726,27 +750,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================
 async def set_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     parts = query.data.split("_", 2)
     if len(parts) != 3:
-        await query.edit_message_text("❌ خطأ في البيانات")
+        await safe_edit(query, "❌ خطأ في البيانات")
         return
     _, sid, typ = parts
     if sid in streams:
         streams[sid]["type"] = typ
         if typ == "rtmp":
             context.user_data["edit"] = ("rtmp_server", sid, query.message.chat_id, query.message.message_id)
-            await query.edit_message_text("📡 أرسل خادم RTMP (مثال: rtmp://live.twitch.tv/app):")
+            await safe_edit(query, "📡 أرسل خادم RTMP (مثال: rtmp://live.twitch.tv/app):")
         else:
             save_streams()
             text = get_panel_text(sid)
-            await query.edit_message_text(
-                text,
-                reply_markup=stream_panel_keyboard(sid, streams[sid]),
-                parse_mode="Markdown"
-            )
+            await safe_edit(query, text, reply_markup=stream_panel_keyboard(sid, streams[sid]), parse_mode="Markdown")
     else:
-        await query.edit_message_text("❌ خطأ")
+        await safe_edit(query, "❌ خطأ")
 
 # =========================================
 # START COMMAND
