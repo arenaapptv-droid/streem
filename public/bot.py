@@ -1,8 +1,4 @@
-Optimized Rplay HLS & RTMP Bot
 
-Python 3.11+
-
-pip install python-telegram-bot aiohttp psutil
 
 import asyncio import json import logging import os import re import shutil import signal import time import traceback from collections import defaultdict
 
