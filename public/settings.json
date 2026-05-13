@@ -1,7 +1,10 @@
 {
   "TOKEN": "8298987414:AAF67HwfVTKikd169gFvBQUXMCUc8mTqsB0",
   "ADMIN_ID": 8266981888,
-  "LOGO_URL_1": "https://i.postimg.cc/FRJF8yqx/Rplay-sport-1-live.png",
-  "LOGO_URL_2": "https://i.postimg.cc/FRJF8yqx/Rplay-sport-1.png",
-  "SLATE_IMAGE_URL": "https://i.postimg.cc/GmnKtYtL/20260508-163600.png"
+    "VIDEO_BITRATE": "6000k",
+  "MAXRATE": "9000k",
+  "BUFSIZE": "18000k",
+  "AUDIO_BITRATE": "128k",
+  "FRAMERATE": 30,
+  "PRESET": "faster"
 }
