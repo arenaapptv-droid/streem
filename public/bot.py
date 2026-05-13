@@ -17,7 +17,7 @@ from telegram.ext import (
 )
 
 # =========================================
-# OPTIONAL PSUTIL
+# PSUTIL
 # =========================================
 try:
     import psutil
@@ -67,41 +67,21 @@ def save_streams():
 # KEYBOARD
 # =========================================
 reply_kb = ReplyKeyboardMarkup([
-    ["📺 قائمة HLS", "📡 قائمة RTMP"],
-    ["➕ إضافة بث", "🖥 مراقبة السيرفر"],
-    ["🧹 تنظيف"]
+    ["📺 قائمة HLS", "🖥 مراقبة السيرفر"],
+    ["➕ إضافة بث", "🧹 تنظيف"]
 ], resize_keyboard=True)
-
-
-# =========================================
-# VIEWERS TRACK
-# =========================================
-async def track_viewer(request, sid):
-    ip = request.headers.get("X-Forwarded-For", request.remote)
-    if not ip:
-        return
-    viewers[sid].add(ip)
-    viewer_last[sid][ip] = time.time()
-
-
-def clean_viewers():
-    now = time.time()
-    for sid in list(viewers.keys()):
-        for ip in list(viewers[sid]):
-            if now - viewer_last[sid].get(ip, 0) > 15:
-                viewers[sid].discard(ip)
-                viewer_last[sid].pop(ip, None)
-
-
-async def clean_viewers_loop():
-    while True:
-        clean_viewers()
-        await asyncio.sleep(10)
 
 
 # =========================================
 # HTTP SERVER
 # =========================================
+async def track_viewer(request, sid):
+    ip = request.headers.get("X-Forwarded-For", request.remote)
+    if ip:
+        viewers[sid].add(ip)
+        viewer_last[sid][ip] = time.time()
+
+
 async def hls_handler(request):
     sid = request.match_info["name"]
     filename = request.match_info.get("file", "index.m3u8")
@@ -127,6 +107,25 @@ async def start_http():
     await site.start()
 
     print(f"HTTP SERVER RUNNING ON {PORT}")
+
+
+# =========================================
+# VIEWERS CLEANUP
+# =========================================
+def clean_viewers():
+    now = time.time()
+
+    for sid in list(viewers.keys()):
+        for ip in list(viewers[sid]):
+            if now - viewer_last[sid].get(ip, 0) > 15:
+                viewers[sid].discard(ip)
+                viewer_last[sid].pop(ip, None)
+
+
+async def clean_viewers_loop():
+    while True:
+        clean_viewers()
+        await asyncio.sleep(10)
 
 
 # =========================================
@@ -183,7 +182,7 @@ async def show_panel(update, sid, context):
         f"🎬 FPS: {s.get('fps','?')}\n"
         f"👥 المشاهدين: {len(viewers[sid])}\n"
         f"⏱ التشغيل: {uptime}\n\n"
-        f"🔗 الرابط:\n{BASE_URL}:{PORT}/live/{sid}/index.m3u8"
+        f"🔗 {BASE_URL}:{PORT}/live/{sid}/index.m3u8"
     )
 
     kb = ReplyKeyboardMarkup([
@@ -212,7 +211,7 @@ async def start_stream(sid, chat_id, bot):
 
     out_file = os.path.join(out_dir, "index.m3u8")
 
-    base = [
+    cmd = [
         "ffmpeg",
         "-re",
         "-user_agent", ua,
@@ -220,13 +219,13 @@ async def start_stream(sid, chat_id, bot):
     ]
 
     if mode == "copy":
-        video = ["-c:v", "copy"]
+        cmd += ["-c:v", "copy"]
     else:
-        video = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]
+        cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]
 
-    audio = ["-c:a", "aac", "-b:a", "128k"]
-
-    cmd = base + video + audio + [
+    cmd += [
+        "-c:a", "aac",
+        "-b:a", "128k",
         "-f", "hls",
         "-hls_time", "2",
         "-hls_list_size", "5",
@@ -245,7 +244,7 @@ async def start_stream(sid, chat_id, bot):
     streams[sid]["start_time"] = time.time()
     save_streams()
 
-    async def log_reader():
+    async def logs():
         while True:
             line = await proc.stderr.readline()
             if not line:
@@ -255,7 +254,7 @@ async def start_stream(sid, chat_id, bot):
             if m:
                 streams[sid]["fps"] = m.group(1)
 
-    asyncio.create_task(log_reader())
+    asyncio.create_task(logs())
 
     await proc.wait()
 
@@ -287,7 +286,7 @@ async def stop_stream(sid):
 
 
 # =========================================
-# HANDLE MESSAGES
+# HANDLE
 # =========================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -346,6 +345,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⏹ توقف")
 
     elif text == "🧹 تنظيف":
+
         shutil.rmtree(HLS_DIR, ignore_errors=True)
         os.makedirs(HLS_DIR, exist_ok=True)
         await update.message.reply_text("تم التنظيف")
@@ -363,7 +363,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================
-# MAIN (FIXED)
+# MAIN (FIXED - IMPORTANT)
 # =========================================
 def main():
 
