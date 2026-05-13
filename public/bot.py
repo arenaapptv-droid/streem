@@ -1,8 +1,19 @@
-import asyncio, time, json, os, logging, re, shutil
+import asyncio, time, json, os, logging, re, shutil, traceback
 from collections import defaultdict
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+
+# ========== إعدادات السجل (تقليل الإزعاج) ==========
+logging.basicConfig(
+    level=logging.WARNING,  # إظهار التحذيرات والأخطاء فقط
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+# إسكات سجلات httpx و aiohttp.access المزعجة
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
+
+logger = logging.getLogger("RplayStable")
 
 # ========== الإعدادات ==========
 with open("settings.json", "r") as f:
@@ -52,9 +63,6 @@ def save_streams():
     with open(STREAMS_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("RplayFinalUI")
-
 viewer_last_seen = defaultdict(dict)
 
 async def track_viewer(request, stream_name):
@@ -100,7 +108,6 @@ async def start_http_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)
     await site.start()
-    logger.info(f"HTTP server on port {HTTP_PORT}")
 
 def get_system_status():
     cpu = 0.0
@@ -164,7 +171,6 @@ async def check_admin(update):
         return False
     return True
 
-# ---------- الكيبورد السفلي الدائم ----------
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("📺 HLS"), KeyboardButton("📡 RTMP")],
@@ -241,7 +247,6 @@ def stream_panel_keyboard(sid, s):
 async def start(update, context):
     if not await check_admin(update): return
     await update.message.reply_text("🖥 **Rplay HLS & RTMP**", reply_markup=main_menu())
-    # إظهار الكيبورد السفلي
     await update.message.reply_text("اختر من الأزرار السفلية للتنقل السريع:", reply_markup=MAIN_KEYBOARD)
 
 async def button_handler(update, context):
@@ -389,12 +394,10 @@ async def button_handler(update, context):
             reply_markup=stream_panel_keyboard(sid, s)
         )
 
-# ---------- معالجة النصوص (الكيبورد السفلي + الحفظ التلقائي) ----------
 async def msg_handler(update, context):
     if not await check_admin(update): return
     text = update.message.text.strip()
 
-    # الكيبورد السفلي
     if text == "📺 HLS":
         await update.message.reply_text("📋 **بثوث HLS**", reply_markup=stream_list("hls"))
         return
@@ -406,7 +409,6 @@ async def msg_handler(update, context):
         await update.message.reply_text("📝 أرسل اسم البث الجديد:")
         return
     elif text == "🖥 مراقبة":
-        # بدء المراقبة في رسالة جديدة
         msg = await update.message.reply_text("⏳ جاري تحميل حالة السيرفر...")
         await start_monitor_live(None, update.message.chat_id, msg.message_id)
         return
@@ -451,7 +453,6 @@ async def msg_handler(update, context):
 
         save_streams()
         await update.message.reply_text(f"✅ تم حفظ {act} لـ {s['name']}")
-        # تحديث لوحة التحكم فوراً
         await update_panel_message(sid, context.bot)
 
 async def update_panel_message(sid, bot):
@@ -693,6 +694,12 @@ async def extra_button_handler(update, context):
     else:
         await button_handler(update, context)
 
+# ========== معالج الأخطاء العام ==========
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تسجيل أي خطأ غير معالج لتجنب التوقف الصامت"""
+    tb_str = ''.join(traceback.format_exception(None, context.error, context.error.__traceback__))
+    logger.error(f"Update {update} caused error: {context.error}\n{tb_str}")
+
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -703,5 +710,6 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(extra_button_handler, pattern="^newtype_"))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay Final UI Ready")
+    app.add_error_handler(error_handler)  # مهم جداً
+    logger.info("Rplay Final Silent Ready")
     app.run_polling()
