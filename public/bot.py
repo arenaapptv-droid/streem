@@ -39,6 +39,14 @@ ADMIN_ID = cfg["ADMIN_ID"]
 BASE_URL = "http://164.68.102.28"
 PORT = 8080
 
+# إعدادات الجودة والسرعة (قابلة للتعديل)
+VIDEO_BITRATE = cfg.get("VIDEO_BITRATE", "4000k")    # خفضت من 9000k
+MAXRATE = cfg.get("MAXRATE", "4000k")
+BUFSIZE = cfg.get("BUFSIZE", "8000k")
+AUDIO_BITRATE = cfg.get("AUDIO_BITRATE", "128k")
+PRESET = cfg.get("PRESET", "ultrafast")              # ultrafast أخف بكثير
+CRF = cfg.get("CRF", 28)                             # 28 يوفر استهلاكاً أقل
+
 HLS_DIR = "/tmp/hls"
 STREAMS_FILE = "streams.json"
 
@@ -164,7 +172,7 @@ def get_panel_text(sid):
         f"📥 المصدر: `{s['source']}`\n"
         f"🖼 الشعار: {'✅' if s.get('logo') else '❌'}\n"
         f"🕵️ UA: `{s.get('ua')}`\n"
-        f"⚙️ الوضع: {'نسخ مباشر' if s['mode']=='copy' else 'ترميز (جودة عالية)'}\n"
+        f"⚙️ الوضع: {'نسخ مباشر' if s['mode']=='copy' else 'ترميز'}\n"
         f"🟢 الحالة: {'يعمل' if s.get('active') else 'متوقف'}\n"
         f"🎬 FPS: {s.get('fps','?')}\n"
         f"👥 المشاهدين: {viewers_count}\n"
@@ -198,7 +206,7 @@ def stream_panel_keyboard(sid, s):
             InlineKeyboardButton("📡 RTMP سيرفر", callback_data=f"rtmpsrv_{sid}"),
             InlineKeyboardButton("🔑 RTMP مفتاح", callback_data=f"rtmpkey_{sid}")
         ])
-    toggle_text = "🔄 نسخ مباشر" if mode == "encode" else "⚙️ ترميز (جودة عالية)"
+    toggle_text = "🔄 نسخ مباشر" if mode == "encode" else "⚙️ ترميز"
     kb.append([InlineKeyboardButton(toggle_text, callback_data=f"mode_{sid}")])
     kb.append([InlineKeyboardButton("🗑 حذف", callback_data=f"del_{sid}")])
     if active:
@@ -248,7 +256,7 @@ def streams_inline_keyboard(stream_type):
     return InlineKeyboardMarkup(kb)
 
 # =========================================
-# FFMPEG STREAM
+# FFMPEG STREAM (OPTIMIZED FOR LOW CPU)
 # =========================================
 async def start_stream(sid, bot):
     s = streams[sid]
@@ -266,33 +274,48 @@ async def start_stream(sid, bot):
         "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "10",
         "-timeout", "10000000", "-rw_timeout", "10000000",
         "-fflags", "+genpts+discardcorrupt",
-        "-analyzeduration", "1000000", "-probesize", "5000000"
+        "-analyzeduration", "500000", "-probesize", "5000000"
     ]
 
     if mode == "copy":
         video_opts = ["-c:v", "copy"]
         filter_complex = None
     else:
+        # إعدادات الترميز الموفرة جدًا للـ CPU
         video_opts = [
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
-            "-g", "90",
-            "-vsync", "cfr", "-r", "30"
+            "-c:v", "libx264", "-preset", PRESET, "-crf", str(CRF),
+            "-b:v", VIDEO_BITRATE, "-maxrate", MAXRATE, "-bufsize", BUFSIZE,
+            "-threads", "2",                    # يحد عدد الأنوية المستخدمة
+            "-tune", "fastdecode",              # تسريع فك التشفير
+            "-x264-params", "no-deblock=1:no-dct-decimate=1"
         ]
-        if logo and os.path.exists(logo):
-            filter_complex = "[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0"
-        else:
-            filter_complex = "[0:v]scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"
+        # فلتر scale فقط إذا كان المصدر أكبر من 1080p
+        filter_complex = "[0:v]scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"
 
-    audio_opts = ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
+        if logo and len(logo) > 5:
+            # إذا كان هناك شعار، نستخدم filter_complex مدمج مع الشعار
+            filter_complex = f"[1:v]scale=120:-1[logo];[0:v]scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease[bg];[bg][logo]overlay=W-w-15:H-h-15"
+            # سيتم إضافة مدخل الشعار لاحقًا
+
+    audio_opts = ["-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ar", "44100", "-ac", "2"]
 
     if typ == "hls":
-        if filter_complex and logo and os.path.exists(logo):
+        if mode != "copy" and logo and len(logo) > 5:
             cmd = [
                 "ffmpeg", "-re", "-user_agent", ua,
                 *reconnect_opts,
                 "-i", src,
                 "-i", logo,
+                "-filter_complex", filter_complex,
+                *video_opts, *audio_opts,
+                "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+                "-hls_flags", "delete_segments", out_file
+            ]
+        elif mode != "copy":
+            cmd = [
+                "ffmpeg", "-re", "-user_agent", ua,
+                *reconnect_opts,
+                "-i", src,
                 "-filter_complex", filter_complex,
                 *video_opts, *audio_opts,
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
@@ -307,14 +330,23 @@ async def start_stream(sid, bot):
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
                 "-hls_flags", "delete_segments", out_file
             ]
-    else:
+    else:  # RTMP
         rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
-        if filter_complex and logo and os.path.exists(logo):
+        if mode != "copy" and logo and len(logo) > 5:
             cmd = [
                 "ffmpeg", "-re", "-user_agent", ua,
                 *reconnect_opts,
                 "-i", src,
                 "-i", logo,
+                "-filter_complex", filter_complex,
+                *video_opts, *audio_opts,
+                "-f", "flv", rtmp_url
+            ]
+        elif mode != "copy":
+            cmd = [
+                "ffmpeg", "-re", "-user_agent", ua,
+                *reconnect_opts,
+                "-i", src,
                 "-filter_complex", filter_complex,
                 *video_opts, *audio_opts,
                 "-f", "flv", rtmp_url
@@ -444,7 +476,7 @@ reply_kb = ReplyKeyboardMarkup([
 ], resize_keyboard=True)
 
 # =========================================
-# SAFE ANSWER FUNCTION
+# SAFE ANSWER & EDIT
 # =========================================
 async def safe_answer(query, text=None, show_alert=False):
     try:
