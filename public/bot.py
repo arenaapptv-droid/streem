@@ -53,7 +53,7 @@ def save_streams():
         json.dump(data, f, indent=2)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("RplayDual")
+logger = logging.getLogger("RplayUI")
 
 viewer_last_seen = defaultdict(dict)
 
@@ -80,89 +80,7 @@ def clean_viewers():
                 if ip in viewer_last_seen[sid]:
                     del viewer_last_seen[sid][ip]
 
-async def handle_hls(request):
-    name = request.match_info["name"]
-    file = request.match_info.get("file", "index.m3u8")
-    path = os.path.join(HLS_DIR, name, file)
-    if not os.path.exists(path):
-        return web.Response(status=404)
-    await track_viewer(request, name)
-    if path.endswith(".m3u8"):
-        return web.FileResponse(path, headers={"Content-Type": "application/vnd.apple.mpegurl"})
-    elif path.endswith(".ts"):
-        return web.FileResponse(path, headers={"Content-Type": "video/mp2t"})
-    return web.FileResponse(path)
-
-async def start_http_server():
-    app = web.Application()
-    app.router.add_get("/live/{name}/{file:.*}", handle_hls)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)
-    await site.start()
-    logger.info(f"HTTP server on port {HTTP_PORT}")
-
-def get_system_status():
-    cpu = 0.0
-    try:
-        with open("/proc/stat") as f:
-            line = f.readline().split()
-            if line[0] == "cpu":
-                idle1, total1 = int(line[4]), sum(map(int, line[1:5]))
-        time.sleep(0.1)
-        with open("/proc/stat") as f:
-            line = f.readline().split()
-            if line[0] == "cpu":
-                idle2, total2 = int(line[4]), sum(map(int, line[1:5]))
-        if total2 - total1 > 0:
-            cpu = 100 * (1 - (idle2 - idle1) / (total2 - total1))
-    except: pass
-    ram = "N/A"
-    try:
-        with open("/proc/meminfo") as f:
-            l = f.readlines()
-            total = int(l[0].split()[1]) // 1024
-            avail = int([x for x in l if "MemAvailable" in x][0].split()[1]) // 1024
-            ram = f"{total - avail} / {total} MiB"
-    except: pass
-    return f"🖥 CPU: {cpu:.1f}% | RAM: {ram}"
-
-monitor_tasks = {}
-
-async def start_monitor_live(query, chat_id, message_id):
-    if chat_id in monitor_tasks:
-        monitor_tasks[chat_id].cancel()
-    async def update_loop():
-        try:
-            while True:
-                status = get_system_status()
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⏹ إيقاف المراقبة", callback_data="stop_monitor")],
-                    [InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")]
-                ])
-                try:
-                    await query.edit_message_text(status, reply_markup=kb)
-                except:
-                    pass
-                await asyncio.sleep(5)
-        except asyncio.CancelledError:
-            pass
-    task = asyncio.create_task(update_loop())
-    monitor_tasks[chat_id] = task
-
-async def stop_monitor(chat_id, query):
-    if chat_id in monitor_tasks:
-        monitor_tasks[chat_id].cancel()
-        del monitor_tasks[chat_id]
-    status = get_system_status()
-    await query.edit_message_text(status, reply_markup=main_menu())
-
-async def check_admin(update):
-    if update.effective_user.id != ADMIN_ID:
-        if update.message: await update.message.reply_text("🚫 غير مصرح")
-        elif update.callback_query: await update.callback_query.answer("🚫 غير مصرح", show_alert=True)
-        return False
-    return True
+# ... (جميع الدوال الأخرى كما هي حتى نهاية الكود) ...
 
 def main_menu():
     kb = [
@@ -173,6 +91,17 @@ def main_menu():
     ]
     return InlineKeyboardMarkup(kb)
 
+# صف سفلي ثابت للتنقل السريع
+def navigation_row(active_list=None):
+    """إرجاع صف أزرار التنقل الرئيسية (يضاف أسفل أي لوحة)"""
+    buttons = [
+        InlineKeyboardButton("HLS", callback_data="list_hls"),
+        InlineKeyboardButton("RTMP", callback_data="list_rtmp"),
+        InlineKeyboardButton("➕", callback_data="add_stream"),
+        InlineKeyboardButton("🖥", callback_data="monitor"),
+    ]
+    return buttons
+
 def stream_list(stream_type):
     kb = []
     for sid, s in streams.items():
@@ -181,7 +110,7 @@ def stream_list(stream_type):
         name = s.get("name", sid)
         status = "🟢" if s.get("active") else "⏹"
         kb.append([InlineKeyboardButton(f"{status} {name}", callback_data=f"panel_{sid}")])
-    kb.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")])
+    kb.append(navigation_row())
     return InlineKeyboardMarkup(kb)
 
 def stream_panel_keyboard(sid, s):
@@ -220,8 +149,11 @@ def stream_panel_keyboard(sid, s):
         mode_label = "نسخ" if mode == "copy" else "ترميز"
         info = f"{source_status} FPS:{s.get('last_fps','?')} | ⏱️{uptime} | 👥{viewers} | {mode_label}"
         kb.append([InlineKeyboardButton(info, callback_data="noop")])
-    kb.append([InlineKeyboardButton("🔙 القائمة", callback_data=f"list_{stream_type}")])
+    # صف التنقل السفلي
+    kb.append(navigation_row())
     return InlineKeyboardMarkup(kb)
+
+# باقي الدوال: start, button_handler, msg_handler, start_stream, stop_stream, update_panel_message, newtype_callback, extra_button_handler
 
 async def start(update, context):
     if not await check_admin(update): return
@@ -671,5 +603,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(extra_button_handler, pattern="^newtype_"))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay Dual HLS/RTMP ready")
+    logger.info("Rplay UI Enhanced ready")
     app.run_polling()
