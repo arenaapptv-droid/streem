@@ -26,7 +26,7 @@ if os.path.exists(STREAMS_FILE):
             for sid, s_data in loaded.items():
                 if "viewers" in s_data and isinstance(s_data["viewers"], list):
                     s_data["viewers"] = set(s_data["viewers"])
-                s_data.setdefault("type", "hls")  # افتراضي
+                s_data.setdefault("type", "hls")
                 s_data.setdefault("user_agent", "")
                 s_data.setdefault("uptime", "00:00:00")
                 s_data.setdefault("last_fps", "?")
@@ -171,7 +171,7 @@ def main_menu():
         [InlineKeyboardButton("➕ إضافة بث", callback_data="add_stream")],
         [InlineKeyboardButton("🖥 مراقبة السيرفر", callback_data="monitor")],
     ]
-    return Inline keyboardMarkup(kb)
+    return InlineKeyboardMarkup(kb)
 
 def stream_list(stream_type):
     kb = []
@@ -247,7 +247,6 @@ async def button_handler(update, context):
         stream_type = "hls" if d == "list_hls" else "rtmp"
         await q.edit_message_text(f"📋 **بثوث {stream_type.upper()}**", reply_markup=stream_list(stream_type))
     elif d == "add_stream":
-        # خطوة 1: طلب الاسم
         context.user_data["mode"] = "add_stream_name"
         await q.edit_message_text("📝 أرسل اسم البث الجديد:")
     elif d.startswith("panel_"):
@@ -278,7 +277,7 @@ async def button_handler(update, context):
     elif "_" in d:
         act, sid = d.split("_", 1)
         if act in ("list_hls", "list_rtmp"):
-            return  # تجاهل
+            return
         s = streams.get(sid)
         if not s:
             await q.edit_message_text("❌ البث غير موجود", reply_markup=main_menu())
@@ -338,7 +337,6 @@ async def button_handler(update, context):
                 await q.answer(f"⏳ جاري التشغيل بوضع {'نسخ' if new_mode == 'copy' else 'ترميز'}...")
             else:
                 await q.answer(f"✅ تم التبديل إلى وضع {'نسخ' if new_mode == 'copy' else 'ترميز'}")
-            # تحديث اللوحة
             stream_type = s.get("type", "hls")
             rtmp_info = ""
             if stream_type == "rtmp":
@@ -357,7 +355,6 @@ async def button_handler(update, context):
             )
             return
 
-        # تحديث اللوحة بعد أي إجراء
         stream_type = s.get("type", "hls")
         rtmp_info = ""
         if stream_type == "rtmp":
@@ -388,10 +385,6 @@ async def msg_handler(update, context):
              InlineKeyboardButton("📡 RTMP", callback_data="newtype_rtmp")]
         ])
         await update.message.reply_text(f"اختر نوع البث **{text}**:", reply_markup=kb)
-        return
-
-    if mode == "add_stream_type":
-        # هذا لا يأتي عبر رسالة نصية بل عبر callback، لكن نتركه احتياط
         return
 
     if mode and "_" in mode:
@@ -507,10 +500,8 @@ async def start_stream(sid, bot):
                 "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
                 "-f", "flv", rtmp_url
             ]
-        # RTMP لا يحتاج fallback
         fallback_cmd = None
     else:
-        # HLS
         if mode == "copy":
             cmd = [
                 "ffmpeg", "-re",
@@ -623,7 +614,6 @@ async def stop_stream(sid, bot):
     s["active"] = False
     s["source_online"] = False
     s["fallback"] = False
-    # تنظيف HLS
     stream_hls_dir = os.path.join(HLS_DIR, sid)
     if os.path.exists(stream_hls_dir):
         try:
@@ -637,7 +627,6 @@ async def stop_stream(sid, bot):
     save_streams()
     await update_panel_message(sid, bot)
 
-# --- معالج callback لاختيار نوع البث الجديد ---
 async def newtype_callback(update, context):
     q = update.callback_query
     await q.answer()
@@ -662,9 +651,8 @@ async def newtype_callback(update, context):
         "type": stream_type
     }
     save_streams()
-    await q.edit_message_text(f"✅ تم إضافة بث {stream_type.upper()} **{name}**")
+    await q.edit_message_text(f"✅ تم إضافة بث {stream_type.upper()} **{name}**", reply_markup=main_menu())
 
-# ربط callback إضافي
 async def extra_button_handler(update, context):
     q = update.callback_query
     d = q.data
