@@ -42,13 +42,14 @@ async def hls_handler(request):
         return web.Response(status=404)
     return web.FileResponse(path)
 
-async def start_http():
+async def run_http_server():
     app = web.Application()
     app.router.add_get("/live/{name}/{file:.*}", hls_handler)
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    print(f"HTTP server on port {PORT}")
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"HTTP server running on port {PORT}")
 
 # ========== أوامر البوت ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -65,9 +66,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     text = update.message.text
-    print(f"Received: {text}")  # للتأكد من وصول النص
+    print(f"Received: {text}")
 
-    # قائمة HLS
     if text == "📺 قائمة HLS":
         if not streams:
             await update.message.reply_text("لا توجد بثوث HLS حالياً")
@@ -79,7 +79,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg += f"{status} {s['name']}\n"
         await update.message.reply_text(msg)
 
-    # قائمة RTMP
     elif text == "📡 قائمة RTMP":
         if not streams:
             await update.message.reply_text("لا توجد بثوث RTMP حالياً")
@@ -91,12 +90,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg += f"{status} {s['name']}\n"
         await update.message.reply_text(msg)
 
-    # إضافة بث
     elif text == "➕ إضافة بث":
         context.user_data["step"] = "wait_name"
         await update.message.reply_text("أرسل اسم البث الجديد:")
 
-    # مراقبة
     elif text == "🖥 مراقبة":
         cpu = "غير متاح"
         try:
@@ -106,7 +103,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         await update.message.reply_text(f"🖥 حمل المعالج: {cpu}\n📡 عدد البثوث: {len(streams)}")
 
-    # معالجة خطوات الإضافة
     elif context.user_data.get("step") == "wait_name":
         name = text.strip()
         sid = name.replace(" ", "_") + str(int(time.time()))
@@ -129,7 +125,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             streams[sid]["source"] = text
             save()
             context.user_data["step"] = None
-            # تشغيل البث تلقائياً
             asyncio.create_task(run_stream(sid, update.message.chat_id, context.bot))
             await update.message.reply_text(f"✅ تم حفظ المصدر وسيبدأ البث خلال لحظات\nرابط المشاهدة:\n{BASE_URL}:{PORT}/live/{sid}/index.m3u8")
         else:
@@ -166,16 +161,15 @@ async def run_stream(sid, chat_id, bot):
     save()
     
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-    s["process"] = sid  # حفظ معرف العملية
     await proc.wait()
     
     s["active"] = False
     save()
     await bot.send_message(chat_id, f"⏹ توقف البث {s['name']}")
 
-# ========== التشغيل ==========
+# ========== التشغيل الرئيسي ==========
 async def main():
-    await start_http()
+    await run_http_server()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
