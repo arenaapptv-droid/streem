@@ -35,10 +35,8 @@ logging.basicConfig(
     level=logging.WARNING,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
-
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
-
 logger = logging.getLogger("RplayOptimized")
 
 # =========================================================
@@ -55,7 +53,6 @@ HTTP_PORT = settings.get("HTTP_PORT", 8080)
 
 STREAMS_FILE = "streams_pro.json"
 HLS_DIR = "/tmp/hls"
-
 os.makedirs(HLS_DIR, exist_ok=True)
 
 # =========================================================
@@ -94,7 +91,6 @@ if os.path.exists(STREAMS_FILE):
             s.setdefault("rtmp_key", "")
             s.setdefault("type", "hls")
             s.setdefault("process", None)
-
             s["viewers"] = set(s["viewers"])
             streams[sid] = s
     except Exception as e:
@@ -627,6 +623,61 @@ async def button_handler(update, context):
         await update_panel_message(sid, context.bot)
         return
 
+    # معالجة باقي الأزرار (start, stop, source, logo, ...)
+    parts = data.split("_", 1)
+    if len(parts) != 2:
+        return
+    act, sid = parts
+    s = streams.get(sid)
+    if not s:
+        return
+
+    if act == "start":
+        if not s.get("source"):
+            await q.answer("❌ لا يوجد مصدر!", show_alert=True)
+            return
+        if s.get("type") == "rtmp" and (not s.get("rtmp_server") or not s.get("rtmp_key")):
+            await q.answer("❌ اضبط خادم RTMP أولاً", show_alert=True)
+            return
+        asyncio.create_task(start_stream(sid, context.bot))
+        await q.answer("⏳ جاري التشغيل...")
+    elif act == "stop":
+        await stop_stream(sid, context.bot)
+        await q.answer("⏹ تم الإيقاف")
+    elif act == "source":
+        context.user_data["edit"] = ("source", sid, q.message.chat_id, q.message.message_id)
+        await q.edit_message_text("📥 أرسل رابط المصدر:")
+    elif act == "logo":
+        context.user_data["edit"] = ("logo", sid, q.message.chat_id, q.message.message_id)
+        await q.edit_message_text("🖼 أرسل رابط الشعار (أو /skip):")
+    elif act == "ua":
+        context.user_data["edit"] = ("ua", sid, q.message.chat_id, q.message.message_id)
+        await q.edit_message_text("🕵️ أرسل User-Agent (أو /skip):")
+    elif act == "rename":
+        context.user_data["edit"] = ("name", sid, q.message.chat_id, q.message.message_id)
+        await q.edit_message_text("✏️ أرسل الاسم الجديد:")
+    elif act == "rtmpsrv":
+        context.user_data["edit"] = ("rtmp_server", sid, q.message.chat_id, q.message.message_id)
+        await q.edit_message_text("📡 أرسل رابط خادم RTMP:")
+    elif act == "rtmpkey":
+        context.user_data["edit"] = ("rtmp_key", sid, q.message.chat_id, q.message.message_id)
+        await q.edit_message_text("🔑 أرسل مفتاح RTMP:")
+    elif act == "togglemode":
+        old = s.get("mode", "copy")
+        new = "transcode" if old == "copy" else "copy"
+        s["mode"] = new
+        save_streams()
+        if s.get("active"):
+            await stop_stream(sid, context.bot)
+            asyncio.create_task(start_stream(sid, context.bot))
+        await update_panel_message(sid, context.bot)
+        await q.answer(f"✅ تم التبديل إلى {'copy' if new=='copy' else 'transcode'}")
+    elif act == "delete":
+        await stop_stream(sid, context.bot)
+        del streams[sid]
+        save_streams()
+        await q.edit_message_text("🗑 تم حذف البث", reply_markup=main_menu())
+
 # =========================================================
 # MESSAGES
 # =========================================================
@@ -634,25 +685,67 @@ async def button_handler(update, context):
 async def msg_handler(update, context):
     if not await check_admin(update):
         return
+
     text = update.message.text.strip()
 
-    if text == "📺 HLS":
-        await update.message.reply_text("📋 HLS Streams", reply_markup=stream_list("hls"))
+    # الأزرار النصية "📺 HLS", "📡 RTMP", "🖥 مراقبة" تم إزالة معالجتها
+    # (لن يقوم البوت بأي رد عند الضغط عليها)
+
+    # معالجة إضافة بث جديد
+    if context.user_data.get("mode") == "add_stream_name":
+        name = text
+        sid = name.replace(" ", "_") + str(int(time.time()))
+        streams[sid] = {
+            "name": name,
+            "source": "",
+            "logo": "",
+            "user_agent": "",
+            "active": False,
+            "fallback": False,
+            "source_online": False,
+            "viewers": set(),
+            "last_fps": "?",
+            "uptime": "00:00:00",
+            "start_time": 0,
+            "panel_msg_id": None,
+            "panel_chat_id": None,
+            "mode": "copy",
+            "rtmp_server": "",
+            "rtmp_key": "",
+            "type": "hls",
+            "process": None,
+        }
+        save_streams()
+        context.user_data["mode"] = None
+        await update.message.reply_text(f"✅ تم إضافة البث: {name}")
         return
-    if text == "📡 RTMP":
-        await update.message.reply_text("📋 RTMP Streams", reply_markup=stream_list("rtmp"))
-        return
-    if text == "🖥 مراقبة":
-        msg = await update.message.reply_text("⏳ جاري التحميل...")
-        class FakeQuery:
-            async def edit_message_text(self, *args, **kwargs):
-                return await context.bot.edit_message_text(
-                    chat_id=msg.chat_id,
-                    message_id=msg.message_id,
-                    *args,
-                    **kwargs
-                )
-        await start_monitor_live(FakeQuery(), msg.chat_id)
+
+    # معالجة بيانات التحرير (source, logo, ua, rename, ...)
+    if context.user_data.get("edit"):
+        typ, sid, chat_id, msg_id = context.user_data["edit"]
+        s = streams.get(sid)
+        if not s:
+            await update.message.reply_text("❌ البث غير موجود")
+            context.user_data["edit"] = None
+            return
+        if typ == "source":
+            s["source"] = text
+        elif typ == "logo":
+            if text != "/skip":
+                s["logo"] = text
+        elif typ == "ua":
+            if text != "/skip":
+                s["user_agent"] = text
+        elif typ == "name":
+            s["name"] = text
+        elif typ == "rtmp_server":
+            s["rtmp_server"] = text
+        elif typ == "rtmp_key":
+            s["rtmp_key"] = text
+        save_streams()
+        context.user_data["edit"] = None
+        await update.message.reply_text("✅ تم الحفظ")
+        await update_panel_message(sid, context.bot)
         return
 
 # =========================================================
