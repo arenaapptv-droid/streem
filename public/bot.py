@@ -627,6 +627,9 @@ async def button_handler(update, context):
         await update_panel_message(sid, context.bot)
         return
 
+    # باقي الأزرار: start, stop, source, logo, ua, rename, rtmpsrv, rtmpkey, togglemode, delete
+    # ستتم إضافتها بعد ذلك
+
 # =========================================================
 # MESSAGES
 # =========================================================
@@ -654,6 +657,41 @@ async def msg_handler(update, context):
                 )
         await start_monitor_live(FakeQuery(), msg.chat_id)
         return
+
+    # ========== إضافة بث جديد ==========
+    if context.user_data.get("mode") == "add_stream_name":
+        name = text.strip()
+        sid = name.replace(" ", "_") + str(int(time.time()))
+
+        streams[sid] = {
+            "name": name,
+            "source": "",
+            "logo": "",
+            "user_agent": "",
+            "active": False,
+            "fallback": False,
+            "source_online": False,
+            "viewers": set(),
+            "last_fps": "?",
+            "uptime": "00:00:00",
+            "start_time": 0,
+            "panel_msg_id": None,
+            "panel_chat_id": None,
+            "mode": "copy",
+            "rtmp_server": "",
+            "rtmp_key": "",
+            "type": "hls",
+            "process": None,
+        }
+
+        save_streams()
+        context.user_data["mode"] = None
+        await update.message.reply_text(f"✅ تم إضافة البث: {name}")
+        return
+
+    # ========== معالجة التعديلات ==========
+    # سيتم إكمالها حسب الحاجة (source, logo, ua, rename, rtmp_server, rtmp_key)
+    # لكن يمكن إضافتها لاحقاً
 
 # =========================================================
 # ERRORS
