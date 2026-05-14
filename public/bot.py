@@ -12,7 +12,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from telegram.error import BadRequest
 
 # =========================================
-# CONFIG - كل الإعدادات هنا
+# CONFIG
 # =========================================
 with open("settings.json") as f:
     cfg = json.load(f)
@@ -22,7 +22,6 @@ ADMIN_ID = cfg["ADMIN_ID"]
 BASE_URL = cfg.get("BASE_URL", "http://164.68.102.28")
 PORT = cfg.get("PORT", 8080)
 
-# إعدادات الترميز
 VIDEO_BITRATE = cfg.get("VIDEO_BITRATE", "4000k")
 AUDIO_BITRATE = cfg.get("AUDIO_BITRATE", "128k")
 PRESET = cfg.get("PRESET", "ultrafast")
@@ -407,13 +406,34 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 # =========================================
-# TEXT HANDLER
+# TEXT HANDLER (الأزرار الرئيسية هنا)
 # =========================================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     text = update.message.text
 
+    # الأزرار الرئيسية من ReplyKeyboard
+    if text == "📺 HLS List":
+        await update.message.reply_text("📺 HLS Streams:", reply_markup=streams_list("hls"))
+        return
+    if text == "📡 RTMP List":
+        await update.message.reply_text("📡 RTMP Streams:", reply_markup=streams_list("rtmp"))
+        return
+    if text == "➕ Add Stream":
+        context.user_data["step"] = "add_name"
+        await update.message.reply_text("📝 Send stream name:")
+        return
+    if text == "🖥 Server Status":
+        await update.message.reply_text(system_status())
+        return
+    if text == "🧹 Clean Files":
+        shutil.rmtree(HLS_DIR, ignore_errors=True)
+        os.makedirs(HLS_DIR, exist_ok=True)
+        await update.message.reply_text("✅ Cleaned")
+        return
+
+    # إضافة بث جديد - الاسم
     if context.user_data.get("step") == "add_name":
         name = text.strip()
         sid = name.replace(" ", "_")
@@ -433,6 +453,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📥 Send source URL:")
         return
 
+    # إضافة بث جديد - المصدر
     if context.user_data.get("step") == "add_source":
         sid = context.user_data.get("sid")
         if sid in streams:
@@ -449,6 +470,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Error")
         return
 
+    # تعديل بيانات البث
     if context.user_data.get("edit"):
         typ, sid, edit_chat, edit_msg = context.user_data["edit"]
         s = streams.get(sid)
@@ -502,7 +524,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎬 **Live Stream Bot**\nUse the buttons below.", reply_markup=reply_kb)
 
 # =========================================
-# MAIN (FIXED EVENT LOOP)
+# MAIN
 # =========================================
 def main():
     loop = asyncio.new_event_loop()
