@@ -1,12 +1,7 @@
 {
   "TOKEN": "8948738346:AAHlvjfZMaGPMPnmk-7NAxYeM2rBh2Qa63E",
-  "ADMIN_ID": 8266981888,
-       "BASE_URL": "http://164.68.102.28",
+  "ADMIN_IDS": [8266981888],
+  "BASE_URL": "http://164.68.102.28",
   "PORT": 8080,
-  "VIDEO_BITRATE": "7000k",
-  "AUDIO_BITRATE": "128k",
-  "PRESET": "ultrafast",
-  "CRF": 24,
-  "THREADS": 1,
-  "TUNE": "fastdecode"
+  "HLS_DIR": "/tmp/hls"
 }
