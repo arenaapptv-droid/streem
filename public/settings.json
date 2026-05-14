@@ -1,10 +1,12 @@
 {
   "TOKEN": "8298987414:AAF67HwfVTKikd169gFvBQUXMCUc8mTqsB0",
   "ADMIN_ID": 8266981888,
-     "VIDEO_BITRATE": "7000k",
-  "MAXRATE": "7000k",
-  "BUFSIZE": "10000k",
+       "BASE_URL": "http://164.68.102.28",
+  "PORT": 8080,
+  "VIDEO_BITRATE": "7000k",
   "AUDIO_BITRATE": "128k",
   "PRESET": "ultrafast",
-  "CRF": 25
+  "CRF": 25,
+  "THREADS": 1,
+  "TUNE": "fastdecode"
 }
