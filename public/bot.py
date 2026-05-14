@@ -11,10 +11,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.error import BadRequest
 
-# ========== الإعدادات الأساسية ==========
+# ========== الإعدادات ==========
 with open("settings.json") as f:
     cfg = json.load(f)
-
 TOKEN = cfg["TOKEN"]
 ADMIN_ID = cfg["ADMIN_ID"]
 BASE_URL = cfg.get("BASE_URL", "http://164.68.102.28")
@@ -30,7 +29,6 @@ processes = {}
 viewers = defaultdict(set)
 viewer_last = defaultdict(dict)
 
-# تحميل البثوث المحفوظة
 if os.path.exists(STREAMS_FILE):
     with open(STREAMS_FILE) as f:
         streams = json.load(f)
@@ -78,7 +76,7 @@ async def start_http():
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    print(f"HTTP على {PORT}")
+    print(f"HTTP on {PORT}")
 
 # ========== حالة النظام ==========
 def system_status():
@@ -87,9 +85,9 @@ def system_status():
         cpu = psutil.cpu_percent()
         mem = psutil.virtual_memory()
         disk = psutil.disk_usage("/")
-        return f"CPU: {cpu}%\nRAM: {mem.percent}%\nDISK: {disk.percent}%\nالبثوث: {len(streams)}"
+        return f"CPU: {cpu}%\nRAM: {mem.percent}%\nDISK: {disk.percent}%\nStreams: {len(streams)}"
     except:
-        return f"البثوث: {len(streams)}"
+        return f"Streams: {len(streams)}"
 
 # ========== مراقبة السيرفر (تحديث كل ثانية) ==========
 monitor_active = False
@@ -106,7 +104,7 @@ async def monitor_loop(bot, chat_id, msg_id):
             pass
         await asyncio.sleep(1)
 
-# ========== واجهة المستخدم ==========
+# ========== واجهة البوت ==========
 # أزرار الرد الرئيسية (ReplyKeyboardMarkup)
 reply_kb = ReplyKeyboardMarkup([
     ["📺 قائمة HLS", "📡 قائمة RTMP"],
@@ -114,11 +112,11 @@ reply_kb = ReplyKeyboardMarkup([
     ["🧹 تنظيف الملفات"]
 ], resize_keyboard=True)
 
-# قوائم البثوث المضمنة (InlineKeyboard) – بدون أزرار رئيسية
-def streams_list(typ):
+# القوائم المضمنة (تبقى InlineKeyboard للبثوث)
+def streams_list(stream_type):
     kb = []
     for sid, s in streams.items():
-        if s["type"] == typ:
+        if s["type"] == stream_type:
             status = "🟢" if s.get("active") else "🔴"
             kb.append([InlineKeyboardButton(f"{status} {s['name']}", callback_data=f"open_{sid}")])
     if not kb:
@@ -126,7 +124,6 @@ def streams_list(typ):
     kb.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")])
     return InlineKeyboardMarkup(kb)
 
-# لوحة تحكم البث (InlineKeyboard)
 def panel_keyboard(sid, s):
     active = s.get("active", False)
     mode = s.get("mode", "copy")
@@ -149,8 +146,8 @@ def panel_keyboard(sid, s):
             InlineKeyboardButton("📡 خادم RTMP", callback_data=f"rtmpsrv_{sid}"),
             InlineKeyboardButton("🔑 مفتاح RTMP", callback_data=f"rtmpkey_{sid}")
         ])
-    toggle = "🔄 نسخ مباشر" if mode == "encode" else "⚙️ ترميز"
-    kb.append([InlineKeyboardButton(toggle, callback_data=f"mode_{sid}")])
+    toggle_text = "🔄 نسخ مباشر" if mode == "encode" else "⚙️ ترميز"
+    kb.append([InlineKeyboardButton(toggle_text, callback_data=f"mode_{sid}")])
     kb.append([InlineKeyboardButton("🗑 حذف", callback_data=f"del_{sid}")])
     if active:
         viewers_count = len(viewers.get(sid, set()))
@@ -165,22 +162,22 @@ async def update_panel(sid, bot):
     s = streams.get(sid)
     if not s or not s.get("chat_id") or not s.get("message_id"):
         return
-    text = (
-        f"🎛️ **{s['name']}**\n"
-        f"📥 المصدر: `{s['source']}`\n"
-        f"🖼 الشعار: {'✅' if s.get('logo') else '❌'}\n"
-        f"🕵️ UA: `{s.get('ua')}`\n"
-        f"⚙️ الوضع: {'نسخ مباشر' if s['mode']=='copy' else 'ترميز'}\n"
-        f"🟢 الحالة: {'يعمل' if s.get('active') else 'متوقف'}\n"
-        f"🎬 FPS: {s.get('fps','?')}\n"
-        f"👥 المشاهدين: {len(viewers.get(sid, set()))}\n"
-        f"⏱️ التشغيل: {time.strftime('%H:%M:%S', time.gmtime(time.time() - s['start_time'])) if s.get('start_time') else '00:00:00'}\n"
-    )
-    if s["type"] == "hls":
-        text += f"\n🔗 {BASE_URL}:{PORT}/live/{sid}/index.m3u8"
-    else:
-        text += f"\n📡 {s.get('rtmp_server')}/{s.get('rtmp_key')}"
     try:
+        text = (
+            f"🎛️ **{s['name']}**\n"
+            f"📥 المصدر: `{s['source']}`\n"
+            f"🖼 الشعار: {'✅' if s.get('logo') else '❌'}\n"
+            f"🕵️ UA: `{s.get('ua')}`\n"
+            f"⚙️ الوضع: {'نسخ مباشر' if s['mode']=='copy' else 'ترميز'}\n"
+            f"🟢 الحالة: {'يعمل' if s.get('active') else 'متوقف'}\n"
+            f"🎬 FPS: {s.get('fps','?')}\n"
+            f"👥 المشاهدين: {len(viewers.get(sid, set()))}\n"
+            f"⏱️ التشغيل: {time.strftime('%H:%M:%S', time.gmtime(time.time() - s['start_time'])) if s.get('start_time') else '00:00:00'}\n"
+        )
+        if s["type"] == "hls":
+            text += f"\n🔗 {BASE_URL}:{PORT}/live/{sid}/index.m3u8"
+        else:
+            text += f"\n📡 {s.get('rtmp_server')}/{s.get('rtmp_key')}"
         await bot.edit_message_text(
             chat_id=s["chat_id"],
             message_id=s["message_id"],
@@ -192,7 +189,7 @@ async def update_panel(sid, bot):
         if "Message is not modified" not in str(e):
             print(f"Panel update error: {e}")
 
-# ========== تشغيل البث (أوامر ffmpeg من Rplay Server) ==========
+# ========== تشغيل البث (باستخدام أوامر Rplay Server الناجحة) ==========
 async def start_stream(sid, bot):
     s = streams[sid]
     src = s["source"]
@@ -222,6 +219,7 @@ async def start_stream(sid, bot):
                 "-hls_flags", "delete_segments", "-y", out_file
             ]
         else:
+            # وضع الترميز (مطابق لـ Rplay Server)
             if logo and len(logo) > 5:
                 cmd = [
                     "ffmpeg", "-re",
@@ -233,7 +231,7 @@ async def start_stream(sid, bot):
                     "-i", logo,
                     "-filter_complex",
                     "[1:v][0:v] scale2ref=iw:ih [logo][ref]; [ref][logo] overlay=0:0",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                     "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
                     "-vsync", "cfr", "-r", "30",
                     "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
@@ -248,7 +246,7 @@ async def start_stream(sid, bot):
                     "-rw_timeout", "10000000",
                     "-fflags", "+genpts+discardcorrupt",
                     "-i", src,
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                     "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
                     "-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease",
                     "-vsync", "cfr", "-r", "30",
@@ -282,7 +280,7 @@ async def start_stream(sid, bot):
                     "-i", logo,
                     "-filter_complex",
                     "[1:v][0:v] scale2ref=iw:ih [logo][ref]; [ref][logo] overlay=0:0",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                     "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
                     "-vsync", "cfr", "-r", "30",
                     "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
@@ -296,7 +294,7 @@ async def start_stream(sid, bot):
                     "-rw_timeout", "10000000",
                     "-fflags", "+genpts+discardcorrupt",
                     "-i", src,
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                     "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
                     "-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease",
                     "-vsync", "cfr", "-r", "30",
@@ -356,7 +354,7 @@ async def stop_stream(sid, bot):
     await update_panel(sid, bot)
 
 # ========== معالجات الأزرار ==========
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global monitor_active, monitor_task
     q = update.callback_query
     try: await q.answer()
@@ -479,8 +477,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("🗑 تم حذف البث", reply_markup=reply_kb)
         return
 
-# ========== معالجة الرسائل النصية ==========
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global monitor_active, monitor_task
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("🚫 غير مصرح")
@@ -517,16 +514,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ تم تنظيف مجلد HLS")
         return
 
-    # إضافة بث جديد: الاسم
+    # إضافة بث جديد: اسم
     if context.user_data.get("step") == "add_name":
         name = text.strip()
         sid = name.replace(" ", "_")
-        # تفادي التكرار
+        # التأكد من عدم التكرار بطريقة نظيفة
         if sid in streams:
-            c = 1
-            while f"{sid}_{c}" in streams:
-                c += 1
-            sid = f"{sid}_{c}"
+            counter = 1
+            while f"{sid}_{counter}" in streams:
+                counter += 1
+            sid = f"{sid}_{counter}"
         streams[sid] = {
             "name": name, "source": "", "type": "hls", "mode": "copy", "active": False,
             "fps": "?", "ua": "ExoPlayerLib/2.18.5", "logo": "", "rtmp_server": "",
@@ -538,7 +535,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📥 أرسل رابط المصدر:")
         return
 
-    # إضافة بث جديد: المصدر
+    # إضافة بث جديد: مصدر
     if context.user_data.get("step") == "add_source":
         sid = context.user_data.get("sid")
         if sid and sid in streams:
@@ -555,29 +552,39 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ خطأ")
         return
 
-    # تعديل بيانات بث موجود
+    # تعديل بيانات البث (مصدر، شعار، UA، إلخ)
     if context.user_data.get("edit"):
-        typ, sid, edit_chat, edit_msg = context.user_data["edit"]
+        typ, sid, edit_chat_id, edit_msg_id = context.user_data["edit"]
         s = streams.get(sid)
         if s:
-            if typ == "source": s["source"] = text
-            elif typ == "logo": s["logo"] = "" if text == "/skip" else text
-            elif typ == "ua": s["ua"] = "ExoPlayerLib/2.18.5" if text == "/skip" else text
-            elif typ == "rename": s["name"] = text
-            elif typ == "rtmp_server": s["rtmp_server"] = text
-            elif typ == "rtmp_key": s["rtmp_key"] = text
+            if typ == "source":
+                s["source"] = text
+            elif typ == "logo":
+                s["logo"] = "" if text == "/skip" else text
+            elif typ == "ua":
+                s["ua"] = "ExoPlayerLib/2.18.5" if text == "/skip" else text
+            elif typ == "rename":
+                old = s["name"]
+                s["name"] = text
+                await update.message.reply_text(f"✅ تم تغيير الاسم من {old} إلى {text}")
+            elif typ == "rtmp_server":
+                s["rtmp_server"] = text
+            elif typ == "rtmp_key":
+                s["rtmp_key"] = text
             save()
             context.user_data.pop("edit")
             await update_panel(sid, context.bot)
             await update.message.delete()
         return
 
-    # إذا كتب المستخدم اسم بث موجود، نفتح لوحة تحكم له
+    # إذا كتب المستخدم اسم بث موجود، نفتح لوحته
     for sid, s in streams.items():
         if s["name"] == text:
+            # إذا كان هناك رسالة مراقبة نشطة، نوقفها
             if monitor_active:
                 monitor_active = False
                 if monitor_task: monitor_task.cancel()
+            # نرسل لوحة البث كرسالة جديدة (بدلاً من تعديل رسالة موجودة)
             await update.message.reply_text(
                 get_panel_text(sid),
                 reply_markup=panel_keyboard(sid, s),
@@ -585,6 +592,26 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
     await update.message.reply_text("❌ اختر من الأزرار أو أرسل اسم بث موجود")
+
+async def set_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, sid, typ = q.data.split("_", 2)
+    if sid in streams:
+        streams[sid]["type"] = typ
+        if typ == "rtmp":
+            context.user_data["edit"] = ("rtmp_server", sid, q.message.chat_id, q.message.message_id)
+            await q.edit_message_text("📡 أرسل خادم RTMP:")
+        else:
+            save()
+            text = get_panel_text(sid)
+            await q.edit_message_text(
+                text,
+                reply_markup=panel_keyboard(sid, streams[sid]),
+                parse_mode="Markdown"
+            )
+    else:
+        await q.edit_message_text("❌ خطأ")
 
 def get_panel_text(sid):
     s = streams.get(sid)
@@ -611,39 +638,27 @@ def get_panel_text(sid):
         text += f"\n📡 {s.get('rtmp_server')}/{s.get('rtmp_key')}"
     return text
 
-# ========== تحديد نوع البث بعد الإضافة ==========
-async def set_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    _, sid, typ = q.data.split("_", 2)
-    if sid in streams:
-        streams[sid]["type"] = typ
-        if typ == "rtmp":
-            context.user_data["edit"] = ("rtmp_server", sid, q.message.chat_id, q.message.message_id)
-            await q.edit_message_text("📡 أرسل خادم RTMP:")
-        else:
-            save()
-            await update_panel(sid, context.bot)
-    else:
-        await q.edit_message_text("❌ خطأ")
-
-# ========== أمر البدء ==========
+# =========================================
+# START COMMAND
+# =========================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("🚫 غير مصرح")
         return
     await update.message.reply_text(
         "🎬 **بوت البث المباشر - الإدارة الكاملة**\n\n"
-        "📌 الأزرار السفلية للقوائم.\n"
+        "📌 استخدم الأزرار السفلية للقوائم.\n"
         "➕ إضافة بث جديد.\n"
         "📺 HLS: بث لمتصفحات / أجهزة.\n"
         "📡 RTMP: بث لـ YouTube / Facebook / Twitch.\n"
         "⚙️ الترميز: جودة عالية (1080p, 9000k).\n\n"
-        "استخدم الأزرار أدناه:",
+        "اختر من الأزرار أدناه:",
         reply_markup=reply_kb
     )
 
-# ========== التشغيل ==========
+# =========================================
+# MAIN
+# =========================================
 def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -651,8 +666,8 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    app.add_handler(CallbackQueryHandler(callback_handler, pattern="^(?!settype_).*"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CallbackQueryHandler(callback, pattern="^(?!settype_).*"))
     app.add_handler(CallbackQueryHandler(set_type_callback, pattern="^settype_"))
 
     print("🚀 البوت يعمل...")
