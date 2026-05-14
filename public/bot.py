@@ -10,7 +10,7 @@ from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# ========== الإعدادات الأساسية ==========
+# ========== الإعدادات ==========
 with open("settings.json") as f:
     cfg = json.load(f)
 TOKEN = cfg["TOKEN"]
@@ -20,6 +20,7 @@ PORT = 8080
 
 HLS_DIR = "/tmp/hls"
 STREAMS_FILE = "streams.json"
+
 os.makedirs(HLS_DIR, exist_ok=True)
 
 streams = {}
@@ -35,7 +36,7 @@ if os.path.exists(STREAMS_FILE):
             s["viewers"] = set(s["viewers"])
         s.setdefault("fps", "?")
         s.setdefault("logo", "")
-        s.setdefault("ua", "Mozilla/5.0")
+        s.setdefault("ua", "ExoPlayerLib/2.18.5")
         s.setdefault("rtmp_server", "")
         s.setdefault("rtmp_key", "")
         s.setdefault("type", "hls")
@@ -87,7 +88,7 @@ def system_status():
     except:
         return f"Streams: {len(streams)}"
 
-# ========== مراقبة السيرفر (تحديث كل 2 ثانية) ==========
+# ========== مراقبة السيرفر ==========
 monitor_active = False
 monitor_task = None
 
@@ -102,7 +103,7 @@ async def monitor_loop(bot, chat_id, msg_id):
             pass
         await asyncio.sleep(2)
 
-# ========== واجهة المستخدم ==========
+# ========== واجهة البوت ==========
 reply_kb = ReplyKeyboardMarkup([
     ["📺 HLS", "📡 RTMP"],
     ["➕ إضافة", "🖥 مراقبة"],
@@ -153,12 +154,12 @@ async def update_panel(sid, bot):
         await bot.edit_message_text(text, s["chat_id"], s["msg_id"], reply_markup=panel_keyboard(sid, s))
     except: pass
 
-# ========== دالة تشغيل البث (بسيطة وآمنة لـ ffmpeg 7) ==========
+# ========== تشغيل البث (نسخة بسيطة ومستقرة) ==========
 async def start_stream(sid, bot):
     s = streams[sid]
     src = s["source"]
     mode = s["mode"]
-    ua = s.get("ua", "Mozilla/5.0")
+    ua = s.get("ua", "ExoPlayerLib/2.18.5")
     logo = s.get("logo", "")
     typ = s["type"]
 
@@ -168,32 +169,21 @@ async def start_stream(sid, bot):
     os.makedirs(out_dir, exist_ok=True)
     out_file = os.path.join(out_dir, "index.m3u8")
 
-    # أوامر ffmpeg الأساسية والمجربة
-    base = [
-        "ffmpeg", "-re",
-        "-i", src,
-        "-user_agent", ua,
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
-        "-analyzeduration", "5000000",
-        "-probesize", "50000000",
-        "-fflags", "nobuffer+genpts"
-    ]
+    # بناء الأمر بطريقة بسيطة وواضحة
+    cmd = ["ffmpeg", "-re", "-user_agent", ua, "-i", src]
 
     if mode == "copy":
-        cmd = base + ["-c:v", "copy", "-c:a", "copy"]
+        cmd += ["-c:v", "copy"]
     else:
-        video = [
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
-            "-g", "90", "-vsync", "cfr", "-r", "30"
-        ]
+        # ترميز بجودة عالية
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k"]
         if logo and len(logo) > 5:
-            video = ["-i", logo, "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0"] + video
+            cmd = ["ffmpeg", "-re", "-user_agent", ua, "-i", src, "-i", logo, "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0"] + cmd[3:]  # إضافة الشعار
         else:
-            video = ["-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"] + video
-        cmd = base + video + ["-c:a", "aac", "-b:a", "128k"]
+            cmd += ["-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"]
+        cmd += ["-g", "90", "-vsync", "cfr", "-r", "30"]
+
+    cmd += ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
 
     if typ == "hls":
         cmd += ["-f", "hls", "-hls_time", "2", "-hls_list_size", "5", "-hls_flags", "delete_segments", "-y", out_file]
@@ -201,6 +191,7 @@ async def start_stream(sid, bot):
         rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
         cmd += ["-f", "flv", "-y", rtmp_url]
 
+    # إزالة أي عملية سابقة
     if sid in processes:
         try:
             processes[sid].terminate()
@@ -208,6 +199,7 @@ async def start_stream(sid, bot):
             processes[sid].kill()
         except: pass
 
+    print(f"Starting stream {sid} with command: {' '.join(cmd)}")
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     processes[sid] = proc
     s["active"] = True
@@ -224,7 +216,7 @@ async def start_stream(sid, bot):
             if m:
                 s["fps"] = m.group(1)
                 await update_panel(sid, bot)
-            if "error" in txt.lower() and "deprecated" not in txt.lower():
+            if "error" in txt.lower() and not "deprecated" in txt.lower():
                 print(f"[{sid}] {txt}")
     asyncio.create_task(read_stderr())
     await proc.wait()
@@ -407,7 +399,7 @@ async def handle_text(update, context):
             sid = f"{sid}_{c}"
         streams[sid] = {
             "name": name, "source": "", "type": "hls", "mode": "copy", "active": False,
-            "fps": "?", "ua": "Mozilla/5.0", "logo": "", "rtmp_server": "", "rtmp_key": "",
+            "fps": "?", "ua": "ExoPlayerLib/2.18.5", "logo": "", "rtmp_server": "", "rtmp_key": "",
             "chat_id": None, "msg_id": None, "start_time": 0
         }
         save()
@@ -437,7 +429,7 @@ async def handle_text(update, context):
         if s:
             if typ == "source": s["source"] = text
             elif typ == "logo": s["logo"] = "" if text == "/skip" else text
-            elif typ == "ua": s["ua"] = text if text != "/skip" else "Mozilla/5.0"
+            elif typ == "ua": s["ua"] = text if text != "/skip" else "ExoPlayerLib/2.18.5"
             elif typ == "name": s["name"] = text
             elif typ == "rtmp_server": s["rtmp_server"] = text
             elif typ == "rtmp_key": s["rtmp_key"] = text
