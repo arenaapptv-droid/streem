@@ -1,211 +1,136 @@
-import asyncio, time, json, os, logging, re, shutil
+import asyncio
+import json
+import os
+import re
+import shutil
+import time
 from collections import defaultdict
-from aiohttp import web
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# ========== الإعدادات ==========
-with open("settings.json", "r") as f:
-    settings = json.load(f)
-    TOKEN = settings["TOKEN"]
-    ADMIN_ID = settings["ADMIN_ID"]
+from aiohttp import web
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.error import BadRequest
+
+# ========== الإعدادات الأساسية ==========
+with open("settings.json") as f:
+    cfg = json.load(f)
+TOKEN = cfg["TOKEN"]
+ADMIN_ID = cfg["ADMIN_ID"]
+BASE_URL = cfg.get("BASE_URL", "http://164.68.102.28")
+PORT = cfg.get("PORT", 8080)
 
 HLS_DIR = "/tmp/hls"
+STREAMS_FILE = "streams.json"
+
 os.makedirs(HLS_DIR, exist_ok=True)
 
-HTTP_PORT = 8080
-BASE_URL = "http://164.68.102.28"
-
-STREAMS_FILE = "streams_pro.json"
 streams = {}
+processes = {}
+viewers = defaultdict(set)
+viewer_last = defaultdict(dict)
 
 if os.path.exists(STREAMS_FILE):
-    try:
-        with open(STREAMS_FILE) as f:
-            loaded = json.load(f)
-            for sid, s_data in loaded.items():
-                if "viewers" in s_data and isinstance(s_data["viewers"], list):
-                    s_data["viewers"] = set(s_data["viewers"])
-                s_data.setdefault("type", "hls")
-                s_data.setdefault("user_agent", "")
-                s_data.setdefault("uptime", "00:00:00")
-                s_data.setdefault("last_fps", "?")
-                s_data.setdefault("start_time", 0)
-                s_data.setdefault("panel_msg_id", None)
-                s_data.setdefault("panel_chat_id", None)
-                s_data.setdefault("mode", "transcode")
-                s_data.setdefault("rtmp_server", "")
-                s_data.setdefault("rtmp_key", "")
-                streams[sid] = s_data
-    except (json.JSONDecodeError, KeyError):
-        logger.error("Failed to parse streams_pro.json, starting fresh.")
-        streams = {}
+    with open(STREAMS_FILE) as f:
+        streams = json.load(f)
+    for sid, s in streams.items():
+        if "viewers" in s and isinstance(s["viewers"], list):
+            s["viewers"] = set(s["viewers"])
+        s.setdefault("fps", "?")
+        s.setdefault("logo", "")
+        s.setdefault("ua", "ExoPlayerLib/2.18.5")
+        s.setdefault("rtmp_server", "")
+        s.setdefault("rtmp_key", "")
+        s.setdefault("type", "hls")
+        s.setdefault("mode", "copy")
+        s.setdefault("message_id", None)
+        s.setdefault("chat_id", None)
+        s.setdefault("start_time", 0)
 
-def save_streams():
+def save():
     data = {}
     for sid, s in streams.items():
-        s_copy = s.copy()
-        if "viewers" in s_copy and isinstance(s_copy["viewers"], set):
-            s_copy["viewers"] = list(s_copy["viewers"])
-        s_copy.pop("process", None)
-        data[sid] = s_copy
+        tmp = s.copy()
+        if "viewers" in tmp and isinstance(tmp["viewers"], set):
+            tmp["viewers"] = list(tmp["viewers"])
+        tmp.pop("process", None)
+        data[sid] = tmp
     with open(STREAMS_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("RplayUI")
-
-viewer_last_seen = defaultdict(dict)
-
-async def track_viewer(request, stream_name):
-    ip = request.remote
-    now = time.time()
-    if stream_name in streams and streams[stream_name].get("type") == "hls":
-        s = streams[stream_name]
-        if not isinstance(s.get("viewers"), set):
-            s["viewers"] = set()
-        s["viewers"].add(ip)
-        viewer_last_seen[stream_name][ip] = now
-
-def clean_viewers():
-    now = time.time()
-    for sid, s in streams.items():
-        if s.get("type") != "hls":
-            continue
-        if not isinstance(s.get("viewers"), set):
-            s["viewers"] = set()
-        for ip in list(s["viewers"]):
-            if now - viewer_last_seen[sid].get(ip, 0) > 10:
-                s["viewers"].discard(ip)
-                if ip in viewer_last_seen[sid]:
-                    del viewer_last_seen[sid][ip]
-
-async def handle_hls(request):
-    name = request.match_info["name"]
-    file = request.match_info.get("file", "index.m3u8")
-    path = os.path.join(HLS_DIR, name, file)
+# ========== خادم HLS ==========
+async def hls_handler(request):
+    sid = request.match_info["name"]
+    filename = request.match_info.get("file", "index.m3u8")
+    path = os.path.join(HLS_DIR, sid, filename)
     if not os.path.exists(path):
         return web.Response(status=404)
-    await track_viewer(request, name)
-    if path.endswith(".m3u8"):
-        return web.FileResponse(path, headers={"Content-Type": "application/vnd.apple.mpegurl"})
-    elif path.endswith(".ts"):
-        return web.FileResponse(path, headers={"Content-Type": "video/mp2t"})
+    ip = request.remote
+    if ip:
+        viewers[sid].add(ip)
+        viewer_last[sid][ip] = time.time()
     return web.FileResponse(path)
 
-async def start_http_server():
+async def start_http():
     app = web.Application()
-    app.router.add_get("/live/{name}/{file:.*}", handle_hls)
+    app.router.add_get("/live/{name}/{file:.*}", hls_handler)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)
-    await site.start()
-    logger.info(f"HTTP server on port {HTTP_PORT}")
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
+    print(f"HTTP on {PORT}")
 
-def get_system_status():
-    cpu = 0.0
+# ========== حالة النظام ==========
+def system_status():
     try:
-        with open("/proc/stat") as f:
-            line = f.readline().split()
-            if line[0] == "cpu":
-                idle1, total1 = int(line[4]), sum(map(int, line[1:5]))
-        time.sleep(0.1)
-        with open("/proc/stat") as f:
-            line = f.readline().split()
-            if line[0] == "cpu":
-                idle2, total2 = int(line[4]), sum(map(int, line[1:5]))
-        if total2 - total1 > 0:
-            cpu = 100 * (1 - (idle2 - idle1) / (total2 - total1))
-    except: pass
-    ram = "N/A"
-    try:
-        with open("/proc/meminfo") as f:
-            l = f.readlines()
-            total = int(l[0].split()[1]) // 1024
-            avail = int([x for x in l if "MemAvailable" in x][0].split()[1]) // 1024
-            ram = f"{total - avail} / {total} MiB"
-    except: pass
-    return f"🖥 CPU: {cpu:.1f}% | RAM: {ram}"
+        import psutil
+        cpu = psutil.cpu_percent()
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage("/")
+        return f"🖥️ CPU: {cpu}%\n🧠 RAM: {mem.percent}%\n💾 DISK: {disk.percent}%\n📡 البثوث: {len(streams)}"
+    except:
+        return f"📡 البثوث: {len(streams)}"
 
-monitor_tasks = {}
+# ========== مراقبة السيرفر (تحديث كل 2 ثانية) ==========
+monitor_active = False
+monitor_task = None
 
-async def start_monitor_live(query, chat_id, message_id):
-    if chat_id in monitor_tasks:
-        monitor_tasks[chat_id].cancel()
-    async def update_loop():
+async def monitor_loop(bot, chat_id, msg_id):
+    global monitor_active
+    while monitor_active:
+        status = system_status()
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⏹ إيقاف المراقبة", callback_data="stop_monitor")]])
         try:
-            while True:
-                status = get_system_status()
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⏹ إيقاف المراقبة", callback_data="stop_monitor")],
-                    [InlineKeyboardButton("🔙 القائمة", callback_data="main_menu")]
-                ])
-                try:
-                    await query.edit_message_text(status, reply_markup=kb)
-                except:
-                    pass
-                await asyncio.sleep(5)
-        except asyncio.CancelledError:
+            await bot.edit_message_text(status, chat_id=chat_id, message_id=msg_id, reply_markup=kb)
+        except:
             pass
-    task = asyncio.create_task(update_loop())
-    monitor_tasks[chat_id] = task
+        await asyncio.sleep(2)
 
-async def stop_monitor(chat_id, query):
-    if chat_id in monitor_tasks:
-        monitor_tasks[chat_id].cancel()
-        del monitor_tasks[chat_id]
-    status = get_system_status()
-    await query.edit_message_text(status, reply_markup=main_menu())
+# ========== واجهة المستخدم ==========
+# أزرار الرد الرئيسية (ReplyKeyboardMarkup)
+reply_kb = ReplyKeyboardMarkup([
+    ["📺 HLS", "📡 RTMP"],
+    ["➕ إضافة", "🖥 مراقبة"],
+    ["🧹 تنظيف"]
+], resize_keyboard=True)
 
-async def check_admin(update):
-    if update.effective_user.id != ADMIN_ID:
-        if update.message: await update.message.reply_text("🚫 غير مصرح")
-        elif update.callback_query: await update.callback_query.answer("🚫 غير مصرح", show_alert=True)
-        return False
-    return True
-
-# ---------- لوحة المفاتيح السفلية الدائمة ----------
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        [KeyboardButton("📺 HLS"), KeyboardButton("📡 RTMP")],
-        [KeyboardButton("➕ إضافة"), KeyboardButton("🖥 مراقبة")]
-    ],
-    resize_keyboard=True
-)
-
-def main_menu():
-    kb = [
-        [InlineKeyboardButton("📺 بثوث HLS", callback_data="list_hls")],
-        [InlineKeyboardButton("📡 بثوث RTMP", callback_data="list_rtmp")],
-        [InlineKeyboardButton("➕ إضافة بث", callback_data="add_stream")],
-        [InlineKeyboardButton("🖥 مراقبة السيرفر", callback_data="monitor")],
-    ]
-    return InlineKeyboardMarkup(kb)
-
-def navigation_row():
-    return [
-        InlineKeyboardButton("HLS", callback_data="list_hls"),
-        InlineKeyboardButton("RTMP", callback_data="list_rtmp"),
-        InlineKeyboardButton("➕", callback_data="add_stream"),
-        InlineKeyboardButton("🖥", callback_data="monitor"),
-    ]
-
-def stream_list(stream_type):
+# قوائم البثوث المضمنة (InlineKeyboard) – بدون أزرار رئيسية
+def streams_list(typ):
     kb = []
     for sid, s in streams.items():
-        if s.get("type") != stream_type:
-            continue
-        name = s.get("name", sid)
-        status = "🟢" if s.get("active") else "⏹"
-        kb.append([InlineKeyboardButton(f"{status} {name}", callback_data=f"panel_{sid}")])
-    kb.append(navigation_row())
+        if s["type"] == typ:
+            status = "🟢" if s.get("active") else "🔴"
+            kb.append([InlineKeyboardButton(f"{status} {s['name']}", callback_data=f"open_{sid}")])
+    if not kb:
+        kb.append([InlineKeyboardButton("❌ لا توجد بثوث", callback_data="noop")])
+    kb.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")])
     return InlineKeyboardMarkup(kb)
 
-def stream_panel_keyboard(sid, s):
-    stream_type = s.get("type", "hls")
-    mode = s.get("mode", "transcode")
+# لوحة تحكم البث (InlineKeyboard)
+def panel_keyboard(sid, s):
+    active = s.get("active", False)
+    mode = s.get("mode", "copy")
+    typ = s.get("type", "hls")
     kb = []
-    if s.get("active"):
+    if active:
         kb.append([InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{sid}")])
     else:
         kb.append([InlineKeyboardButton("▶️ تشغيل", callback_data=f"start_{sid}")])
@@ -217,489 +142,498 @@ def stream_panel_keyboard(sid, s):
         InlineKeyboardButton("🕵️ UA", callback_data=f"ua_{sid}"),
         InlineKeyboardButton("✏️ إعادة تسمية", callback_data=f"rename_{sid}")
     ])
-    if stream_type == "rtmp":
+    if typ == "rtmp":
         kb.append([
             InlineKeyboardButton("📡 خادم RTMP", callback_data=f"rtmpsrv_{sid}"),
             InlineKeyboardButton("🔑 مفتاح RTMP", callback_data=f"rtmpkey_{sid}")
         ])
-    if mode == "transcode":
-        toggle_text = "🔄 نسخ مباشر (أخف)"
-    else:
-        toggle_text = "⚙️ ترميز (شعار)"
-    kb.append([InlineKeyboardButton(toggle_text, callback_data=f"togglemode_{sid}")])
-    kb.append([InlineKeyboardButton("🗑 حذف", callback_data=f"delete_{sid}")])
-    if s.get("active"):
-        source_status = "🟢" if s.get("source_online") else "🔴"
-        viewers = len(s.get("viewers", set())) if stream_type == "hls" else 0
-        uptime = s.get('uptime', '00:00:00')
+    toggle = "🔄 نسخ مباشر" if mode == "encode" else "⚙️ ترميز"
+    kb.append([InlineKeyboardButton(toggle, callback_data=f"mode_{sid}")])
+    kb.append([InlineKeyboardButton("🗑 حذف", callback_data=f"del_{sid}")])
+    if active:
+        viewers_count = len(viewers.get(sid, set()))
+        uptime = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
         mode_label = "نسخ" if mode == "copy" else "ترميز"
-        info = f"{source_status} FPS:{s.get('last_fps','?')} | ⏱️{uptime} | 👥{viewers} | {mode_label}"
+        info = f"FPS:{s.get('fps','?')} | 👥{viewers_count} | ⏱️{uptime} | {mode_label}"
         kb.append([InlineKeyboardButton(info, callback_data="noop")])
-    kb.append(navigation_row())
+    kb.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")])
     return InlineKeyboardMarkup(kb)
 
-async def start(update, context):
-    if not await check_admin(update): return
-    await update.message.reply_text("🖥 **Rplay HLS & RTMP**", reply_markup=main_menu())
-
-async def button_handler(update, context):
-    q = update.callback_query
-    await q.answer()
-    d = q.data
-    if not await check_admin(update): return
-    chat_id = q.message.chat_id
-
-    if d == "monitor":
-        await start_monitor_live(q, chat_id, q.message.message_id)
-        return
-    if d == "stop_monitor":
-        await stop_monitor(chat_id, q)
-        return
-
-    if d == "main_menu":
-        await q.edit_message_text("🖥 **Rplay HLS & RTMP**", reply_markup=main_menu())
-    elif d in ("list_hls", "list_rtmp"):
-        stream_type = "hls" if d == "list_hls" else "rtmp"
-        await q.edit_message_text(f"📋 **بثوث {stream_type.upper()}**", reply_markup=stream_list(stream_type))
-    elif d == "add_stream":
-        context.user_data["mode"] = "add_stream_name"
-        await q.edit_message_text("📝 أرسل اسم البث الجديد:")
-    elif d.startswith("panel_"):
-        sid = d.split("_", 1)[1]
-        s = streams.get(sid)
-        if not s:
-            await q.edit_message_text("❌ البث غير موجود", reply_markup=main_menu())
-            return
-        s["panel_msg_id"] = q.message.message_id
-        s["panel_chat_id"] = q.message.chat_id
-        name = s.get("name", sid)
-        stream_type = s.get("type", "hls")
-        rtmp_info = ""
-        if stream_type == "rtmp":
-            rtmp_info = f"\n📡 RTMP: {s.get('rtmp_server', 'غير محدد')}/{s.get('rtmp_key', 'غير محدد')}"
-        link = ""
-        if stream_type == "hls":
-            link = f"\n🔗 الرابط: {BASE_URL}:{HTTP_PORT}/live/{sid}/index.m3u8"
-        await q.edit_message_text(
-            f"🎛️ **{name}** ({stream_type.upper()})\n"
-            f"📥 المصدر: {s['source'] or 'غير محدد'}\n"
-            f"🖼 الشعار: {'موجود' if s['logo'] else 'لا يوجد'}\n"
-            f"🕵️ UA: {s['user_agent'] or 'افتراضي'}"
-            f"{rtmp_info}"
-            f"{link}",
-            reply_markup=stream_panel_keyboard(sid, s)
-        )
-    elif "_" in d:
-        act, sid = d.split("_", 1)
-        if act in ("list_hls", "list_rtmp"):
-            return
-        s = streams.get(sid)
-        if not s:
-            await q.edit_message_text("❌ البث غير موجود", reply_markup=main_menu())
-            return
-        name = s.get("name", sid)
-
-        if act == "start":
-            if not s["source"]:
-                await q.answer("❌ عيّن المصدر أولاً", show_alert=True)
-                return
-            if s.get("type") == "rtmp" and (not s.get("rtmp_server") or not s.get("rtmp_key")):
-                await q.answer("❌ عيّن خادم ومفتاح RTMP أولاً", show_alert=True)
-                return
-            asyncio.create_task(start_stream(sid, context.bot))
-            await q.answer("⏳ جاري التشغيل...")
-        elif act == "stop":
-            await stop_stream(sid, context.bot)
-            await q.answer("⏹ تم الإيقاف والتنظيف")
-        elif act == "source":
-            context.user_data["mode"] = f"source_{sid}"
-            await q.edit_message_text(f"📥 أرسل رابط المصدر لـ {name}:")
-            return
-        elif act == "logo":
-            context.user_data["mode"] = f"logo_{sid}"
-            await q.edit_message_text(f"🖼 أرسل رابط الشعار لـ {name} (أو /skip):")
-            return
-        elif act == "ua":
-            context.user_data["mode"] = f"ua_{sid}"
-            await q.edit_message_text(f"🕵️ أرسل User-Agent لـ {name} (أو /skip):")
-            return
-        elif act == "rename":
-            context.user_data["mode"] = f"rename_{sid}"
-            await q.edit_message_text(f"✏️ أرسل الاسم الجديد لـ {name}:")
-            return
-        elif act == "rtmpsrv":
-            context.user_data["mode"] = f"rtmpsrv_{sid}"
-            await q.edit_message_text(f"📡 أرسل رابط خادم RTMP لـ {name} (مثال: rtmp://example.com/live):")
-            return
-        elif act == "rtmpkey":
-            context.user_data["mode"] = f"rtmpkey_{sid}"
-            await q.edit_message_text(f"🔑 أرسل مفتاح RTMP لـ {name}:")
-            return
-        elif act == "delete":
-            await stop_stream(sid, context.bot)
-            del streams[sid]
-            save_streams()
-            await q.edit_message_text(f"🗑 تم حذف {name} بالكامل", reply_markup=main_menu())
-            return
-        elif act == "togglemode":
-            old_mode = s.get("mode", "transcode")
-            new_mode = "copy" if old_mode == "transcode" else "transcode"
-            s["mode"] = new_mode
-            save_streams()
-            if s.get("active"):
-                await stop_stream(sid, context.bot)
-                asyncio.create_task(start_stream(sid, context.bot))
-                await q.answer(f"⏳ جاري التشغيل بوضع {'نسخ' if new_mode == 'copy' else 'ترميز'}...")
-            else:
-                await q.answer(f"✅ تم التبديل إلى وضع {'نسخ' if new_mode == 'copy' else 'ترميز'}")
-            stream_type = s.get("type", "hls")
-            rtmp_info = ""
-            if stream_type == "rtmp":
-                rtmp_info = f"\n📡 RTMP: {s.get('rtmp_server', 'غير محدد')}/{s.get('rtmp_key', 'غير محدد')}"
-            link = ""
-            if stream_type == "hls":
-                link = f"\n🔗 الرابط: {BASE_URL}:{HTTP_PORT}/live/{sid}/index.m3u8"
-            await q.edit_message_text(
-                f"🎛️ **{name}** ({stream_type.upper()})\n"
-                f"📥 المصدر: {s['source'] or 'غير محدد'}\n"
-                f"🖼 الشعار: {'موجود' if s['logo'] else 'لا يوجد'}\n"
-                f"🕵️ UA: {s['user_agent'] or 'افتراضي'}"
-                f"{rtmp_info}"
-                f"{link}",
-                reply_markup=stream_panel_keyboard(sid, s)
-            )
-            return
-
-        stream_type = s.get("type", "hls")
-        rtmp_info = ""
-        if stream_type == "rtmp":
-            rtmp_info = f"\n📡 RTMP: {s.get('rtmp_server', 'غير محدد')}/{s.get('rtmp_key', 'غير محدد')}"
-        link = ""
-        if stream_type == "hls":
-            link = f"\n🔗 الرابط: {BASE_URL}:{HTTP_PORT}/live/{sid}/index.m3u8"
-        await q.edit_message_text(
-            f"🎛️ **{name}** ({stream_type.upper()})\n"
-            f"📥 المصدر: {s['source'] or 'غير محدد'}\n"
-            f"🖼 الشعار: {'موجود' if s['logo'] else 'لا يوجد'}\n"
-            f"🕵️ UA: {s['user_agent'] or 'افتراضي'}"
-            f"{rtmp_info}"
-            f"{link}",
-            reply_markup=stream_panel_keyboard(sid, s)
-        )
-
-# ---------- معالجة النصوص (تحديث تلقائي للوحة) ----------
-async def msg_handler(update, context):
-    if not await check_admin(update): return
-    text = update.message.text.strip()
-
-    # التعامل مع الأزرار السفلية
-    if text == "📺 HLS":
-        await update.message.reply_text("📋 **بثوث HLS**", reply_markup=stream_list("hls"))
-        return
-    elif text == "📡 RTMP":
-        await update.message.reply_text("📋 **بثوث RTMP**", reply_markup=stream_list("rtmp"))
-        return
-    elif text == "➕ إضافة":
-        context.user_data["mode"] = "add_stream_name"
-        await update.message.reply_text("📝 أرسل اسم البث الجديد:")
-        return
-    elif text == "🖥 مراقبة":
-        # بدء المراقبة الحية
-        chat_id = update.message.chat_id
-        await start_monitor_live(update.callback_query, chat_id, None) if False else None
-        return
-
-    mode = context.user_data.get("mode")
-
-    if mode == "add_stream_name":
-        context.user_data["mode"] = "add_stream_type"
-        context.user_data["new_name"] = text
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📺 HLS", callback_data="newtype_hls"),
-             InlineKeyboardButton("📡 RTMP", callback_data="newtype_rtmp")]
-        ])
-        await update.message.reply_text(f"اختر نوع البث **{text}**:", reply_markup=kb)
-        return
-
-    if mode and "_" in mode:
-        act, sid = mode.split("_", 1)
-        context.user_data["mode"] = None
-        s = streams.get(sid)
-        if not s:
-            await update.message.reply_text("❌ بث غير موجود")
-            return
-
-        if act == "source":
-            s["source"] = text
-        elif act == "logo":
-            s["logo"] = "" if text.lower() == "/skip" else text
-        elif act == "ua":
-            s["user_agent"] = "" if text.lower() == "/skip" else text
-        elif act == "rename":
-            old = s["name"]
-            s["name"] = text
-            await update.message.reply_text(f"✅ تم تغيير الاسم من {old} إلى {text}")
-            save_streams()
-            await update_panel_message(sid, context.bot)
-            return
-        elif act == "rtmpsrv":
-            s["rtmp_server"] = text
-        elif act == "rtmpkey":
-            s["rtmp_key"] = text
-
-        save_streams()
-        await update.message.reply_text(f"✅ تم حفظ {act} لـ {s['name']}")
-        # تحديث لوحة التحكم فوراً
-        await update_panel_message(sid, context.bot)
-
-async def update_panel_message(sid, bot):
+async def update_panel(sid, bot):
     s = streams.get(sid)
-    if not s or not s.get("panel_msg_id") or not s.get("panel_chat_id"):
+    if not s or not s.get("chat_id") or not s.get("message_id"):
         return
+    text = (
+        f"🎛️ **{s['name']}**\n"
+        f"📥 المصدر: `{s['source']}`\n"
+        f"🖼 الشعار: {'✅' if s.get('logo') else '❌'}\n"
+        f"🕵️ UA: `{s.get('ua')}`\n"
+        f"⚙️ الوضع: {'نسخ مباشر' if s['mode']=='copy' else 'ترميز'}\n"
+        f"🟢 الحالة: {'يعمل' if s.get('active') else 'متوقف'}\n"
+        f"🎬 FPS: {s.get('fps','?')}\n"
+        f"👥 المشاهدين: {len(viewers.get(sid, set()))}\n"
+        f"⏱️ التشغيل: {time.strftime('%H:%M:%S', time.gmtime(time.time() - s['start_time'])) if s.get('start_time') else '00:00:00'}\n"
+    )
+    if s["type"] == "hls":
+        text += f"\n🔗 {BASE_URL}:{PORT}/live/{sid}/index.m3u8"
+    else:
+        text += f"\n📡 {s.get('rtmp_server')}/{s.get('rtmp_key')}"
     try:
-        name = s.get("name", sid)
-        stream_type = s.get("type", "hls")
-        source_status = "🟢" if s.get("source_online") else "🔴"
-        viewers = len(s.get("viewers", set())) if stream_type == "hls" else 0
-        uptime = s.get('uptime', '00:00:00')
-        mode_label = "نسخ" if s.get("mode") == "copy" else "ترميز"
-        rtmp_info = ""
-        if stream_type == "rtmp":
-            rtmp_info = f"\n📡 RTMP: {s.get('rtmp_server', 'غير محدد')}/{s.get('rtmp_key', 'غير محدد')}"
-        link = ""
-        if stream_type == "hls":
-            link = f"\n🔗 الرابط: {BASE_URL}:{HTTP_PORT}/live/{sid}/index.m3u8"
-        text = (
-            f"🎛️ **{name}** ({stream_type.upper()})\n"
-            f"📥 المصدر: {s['source'] or 'غير محدد'}\n"
-            f"🖼 الشعار: {'موجود' if s['logo'] else 'لا يوجد'}\n"
-            f"🕵️ UA: {s['user_agent'] or 'افتراضي'}"
-            f"{rtmp_info}"
-            f"{link}"
-        )
         await bot.edit_message_text(
-            chat_id=s["panel_chat_id"],
-            message_id=s["panel_msg_id"],
+            chat_id=s["chat_id"],
+            message_id=s["message_id"],
             text=text,
-            reply_markup=stream_panel_keyboard(sid, s)
+            reply_markup=panel_keyboard(sid, s),
+            parse_mode="Markdown"
         )
     except Exception as e:
-        logger.error(f"Update panel error: {e}")
+        if "Message is not modified" not in str(e):
+            print(f"Panel update error: {e}")
 
+def get_panel_text(sid):
+    s = streams.get(sid)
+    if not s:
+        return "❌ البث غير موجود"
+    uptime = "00:00:00"
+    if s.get("start_time"):
+        uptime = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
+    viewers_count = len(viewers.get(sid, set()))
+    text = (
+        f"🎛️ **{s['name']}**\n"
+        f"📥 المصدر: `{s['source']}`\n"
+        f"🖼 الشعار: {'✅' if s.get('logo') else '❌'}\n"
+        f"🕵️ UA: `{s.get('ua')}`\n"
+        f"⚙️ الوضع: {'نسخ مباشر' if s['mode']=='copy' else 'ترميز'}\n"
+        f"🟢 الحالة: {'يعمل' if s.get('active') else 'متوقف'}\n"
+        f"🎬 FPS: {s.get('fps','?')}\n"
+        f"👥 المشاهدين: {viewers_count}\n"
+        f"⏱️ التشغيل: {uptime}\n"
+    )
+    if s["type"] == "hls":
+        text += f"\n🔗 {BASE_URL}:{PORT}/live/{sid}/index.m3u8"
+    else:
+        text += f"\n📡 {s.get('rtmp_server')}/{s.get('rtmp_key')}"
+    return text
+
+# ========== تشغيل البث (أوامر مستقرة ومقاومة للأخطاء) ==========
 async def start_stream(sid, bot):
     s = streams[sid]
     src = s["source"]
+    mode = s.get("mode", "copy")
+    ua = s.get("ua", "ExoPlayerLib/2.18.5")
     logo = s.get("logo", "")
-    user_agent = s.get("user_agent", "ExoPlayerLib/2.18.5")
-    mode = s.get("mode", "transcode")
-    stream_type = s.get("type", "hls")
+    typ = s["type"]
 
     out_dir = os.path.join(HLS_DIR, sid)
+    if os.path.exists(out_dir):
+        shutil.rmtree(out_dir, ignore_errors=True)
     os.makedirs(out_dir, exist_ok=True)
-    out_playlist = os.path.join(out_dir, "index.m3u8")
+    out_file = os.path.join(out_dir, "index.m3u8")
 
-    if stream_type == "rtmp":
+    # خيارات إعادة الاتصال المتقدمة والتحميل المسبق
+    base_opts = [
+        "ffmpeg", "-re",
+        "-user_agent", ua,
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+        "-timeout", "10000000", "-rw_timeout", "10000000",
+        "-fflags", "+genpts+discardcorrupt",
+        "-analyzeduration", "5000000", "-probesize", "50000000",
+        "-stream_loop", "-1"
+    ]
+
+    if typ == "hls":
+        if mode == "copy":
+            cmd = base_opts + ["-i", src] + [
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+                "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+                "-hls_flags", "delete_segments", "-y", out_file
+            ]
+        else:
+            if logo and len(logo) > 5:
+                cmd = base_opts + ["-i", src, "-i", logo, "-filter_complex",
+                                   "[1:v][0:v] scale2ref=iw:ih [logo][ref]; [ref][logo] overlay=0:0"] + [
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                    "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
+                    "-vsync", "cfr", "-r", "30", "-g", "90",
+                    "-c:a", "aac", "-b:a", "128k",
+                    "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+                    "-hls_flags", "delete_segments", "-y", out_file
+                ]
+            else:
+                cmd = base_opts + ["-i", src] + [
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                    "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
+                    "-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease",
+                    "-vsync", "cfr", "-r", "30", "-g", "90",
+                    "-c:a", "aac", "-b:a", "128k",
+                    "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+                    "-hls_flags", "delete_segments", "-y", out_file
+                ]
+    else:  # RTMP
         rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
         if mode == "copy":
-            cmd = [
-                "ffmpeg", "-re",
-                "-user_agent", user_agent,
-                "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-                "-rw_timeout", "10000000", "-fflags", "+genpts+discardcorrupt",
-                "-i", src,
-                "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-                "-f", "flv", rtmp_url
+            cmd = base_opts + ["-i", src] + [
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+                "-f", "flv", "-y", rtmp_url
             ]
         else:
-            cmd = [
-                "ffmpeg", "-re",
-                "-user_agent", user_agent,
-                "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-                "-rw_timeout", "10000000", "-fflags", "+genpts+discardcorrupt",
-                "-i", src
-            ]
-            if logo:
-                cmd += [
-                    "-i", logo,
-                    "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo];[logo][ref]overlay=0:0"
+            if logo and len(logo) > 5:
+                cmd = base_opts + ["-i", src, "-i", logo, "-filter_complex",
+                                   "[1:v][0:v] scale2ref=iw:ih [logo][ref]; [ref][logo] overlay=0:0"] + [
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                    "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
+                    "-vsync", "cfr", "-r", "30", "-g", "90",
+                    "-c:a", "aac", "-b:a", "128k",
+                    "-f", "flv", "-y", rtmp_url
                 ]
-            cmd += [
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                "-b:v", "3000k", "-maxrate", "3000k", "-bufsize", "6000k",
-                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-                "-f", "flv", rtmp_url
-            ]
-        fallback_cmd = None
-    else:
-        if mode == "copy":
-            cmd = [
-                "ffmpeg", "-re",
-                "-user_agent", user_agent,
-                "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-                "-rw_timeout", "10000000", "-fflags", "+genpts+discardcorrupt",
-                "-i", src,
-                "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-                "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
-                "-hls_flags", "delete_segments",
-                out_playlist
-            ]
-        else:
-            cmd = [
-                "ffmpeg", "-re",
-                "-user_agent", user_agent,
-                "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-                "-rw_timeout", "10000000", "-fflags", "+genpts+discardcorrupt",
-                "-i", src
-            ]
-            if logo:
-                cmd += [
-                    "-i", logo,
-                    "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo];[logo][ref]overlay=0:0"
+            else:
+                cmd = base_opts + ["-i", src] + [
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                    "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
+                    "-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease",
+                    "-vsync", "cfr", "-r", "30", "-g", "90",
+                    "-c:a", "aac", "-b:a", "128k",
+                    "-f", "flv", "-y", rtmp_url
                 ]
-            cmd += [
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                "-b:v", "3000k", "-maxrate", "3000k", "-bufsize", "6000k",
-                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-                "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
-                "-hls_flags", "delete_segments",
-                out_playlist
-            ]
-        fallback_cmd = [
-            "ffmpeg", "-re",
-            "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=30",
-            "-i", logo if logo else "color=c=black:s=1920x1080:r=30",
-            "-filter_complex", "[0:v][1:v]overlay=0:0" if logo else "null",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-            "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
-            "-hls_flags", "delete_segments",
-            out_playlist
-        ]
 
+    if sid in processes:
+        try:
+            processes[sid].terminate()
+            await asyncio.sleep(0.5)
+            processes[sid].kill()
+        except: pass
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE
+    )
+    processes[sid] = proc
     s["active"] = True
     s["start_time"] = time.time()
-    save_streams()
+    save()
+    await update_panel(sid, bot)
 
-    retries = 3
-    while s["active"]:
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-        s["process"] = proc
-        s["source_online"] = True
+    async def read_stderr():
+        while True:
+            line = await proc.stderr.readline()
+            if not line: break
+            txt = line.decode(errors="ignore").strip()
+            m = re.search(r"fps=\s*([\d.]+)", txt)
+            if m:
+                s["fps"] = m.group(1)
+                await update_panel(sid, bot)
+            if "error" in txt.lower() and "deprecated" not in txt.lower():
+                print(f"[{sid}] {txt}")
+    asyncio.create_task(read_stderr())
+    await proc.wait()
 
-        async def read_stderr():
-            while True:
-                line = await proc.stderr.readline()
-                if not line: break
-                decoded = line.decode(errors="ignore").strip()
-                if "fps=" in decoded:
-                    m = re.search(r"fps=\s*([\d.]+)", decoded)
-                    if m: s["last_fps"] = m.group(1)
-
-        reader = asyncio.create_task(read_stderr())
-
-        while proc.returncode is None:
-            clean_viewers()
-            s["uptime"] = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
-            await update_panel_message(sid, bot)
-            await asyncio.sleep(5)
-
-        await proc.wait()
-        s["source_online"] = False
-        await update_panel_message(sid, bot)
-
-        retries -= 1
-        if retries > 0:
-            await asyncio.sleep(2)
-            continue
-
-        if s["active"] and fallback_cmd:
-            fallback_proc = await asyncio.create_subprocess_exec(*fallback_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-            s["process"] = fallback_proc
-            s["fallback"] = True
-            s["source_online"] = False
-            await update_panel_message(sid, bot)
-            await asyncio.sleep(20)
-            fallback_proc.kill()
-            await fallback_proc.wait()
-            retries = 3
-        else:
-            break
-
-    if s.get("process"):
-        s["process"].kill()
     s["active"] = False
-    save_streams()
-    await update_panel_message(sid, bot)
+    processes.pop(sid, None)
+    save()
+    await update_panel(sid, bot)
 
 async def stop_stream(sid, bot):
-    s = streams.get(sid)
-    if not s: return
-    if s.get("process"):
+    if sid in processes:
         try:
-            s["process"].kill()
-            await s["process"].wait()
+            processes[sid].terminate()
+            await asyncio.sleep(0.5)
+            processes[sid].kill()
         except: pass
-        s["process"] = None
-    s["active"] = False
-    s["source_online"] = False
-    s["fallback"] = False
-    stream_hls_dir = os.path.join(HLS_DIR, sid)
-    if os.path.exists(stream_hls_dir):
-        try:
-            shutil.rmtree(stream_hls_dir)
-        except: pass
-    if isinstance(s.get("viewers"), set):
-        s["viewers"].clear()
-    s["last_fps"] = "?"
-    s["uptime"] = "00:00:00"
-    s["start_time"] = 0
-    save_streams()
-    await update_panel_message(sid, bot)
+        processes.pop(sid, None)
+    if sid in streams:
+        streams[sid]["active"] = False
+        save()
+    shutil.rmtree(os.path.join(HLS_DIR, sid), ignore_errors=True)
+    await update_panel(sid, bot)
 
-async def newtype_callback(update, context):
+# ========== معالجات الأزرار ==========
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global monitor_active, monitor_task
+    q = update.callback_query
+    try: await q.answer()
+    except: pass
+    data = q.data
+    chat_id = q.message.chat_id
+    msg_id = q.message.message_id
+
+    if data == "main_menu":
+        if monitor_active:
+            monitor_active = False
+            if monitor_task: monitor_task.cancel()
+        await q.edit_message_text("🎬 القائمة الرئيسية", reply_markup=inline_main_menu())
+        return
+
+    if data == "stop_monitor":
+        if monitor_active:
+            monitor_active = False
+            if monitor_task: monitor_task.cancel()
+        await q.edit_message_text(system_status(), reply_markup=inline_main_menu())
+        return
+
+    if data == "list_hls":
+        await q.edit_message_text("📺 قائمة HLS:", reply_markup=streams_list("hls"))
+        return
+    if data == "list_rtmp":
+        await q.edit_message_text("📡 قائمة RTMP:", reply_markup=streams_list("rtmp"))
+        return
+
+    if data.startswith("open_"):
+        sid = data[5:]
+        if sid in streams:
+            streams[sid]["chat_id"] = chat_id
+            streams[sid]["message_id"] = msg_id
+            save()
+            await update_panel(sid, context.bot)
+        else:
+            await q.edit_message_text("❌ البث غير موجود")
+        return
+
+    if data.startswith("start_"):
+        sid = data[6:]
+        if sid in streams:
+            s = streams[sid]
+            if not s.get("source"):
+                await q.answer("❌ لا يوجد مصدر!", show_alert=True)
+                return
+            if s["type"] == "rtmp" and (not s.get("rtmp_server") or not s.get("rtmp_key")):
+                await q.answer("❌ إعدادات RTMP غير مكتملة!", show_alert=True)
+                return
+            if s.get("active"):
+                await q.answer("⚠️ البث يعمل بالفعل", show_alert=True)
+                return
+            await q.answer("⏳ جاري التشغيل...")
+            asyncio.create_task(start_stream(sid, context.bot))
+        else:
+            await q.answer("❌ خطأ", show_alert=True)
+        return
+
+    if data.startswith("stop_"):
+        sid = data[5:]
+        await q.answer("⏹ تم الإيقاف")
+        asyncio.create_task(stop_stream(sid, context.bot))
+        return
+
+    if data.startswith("source_"):
+        sid = data[7:]
+        context.user_data["edit"] = ("source", sid, chat_id, msg_id)
+        await q.edit_message_text("📥 أرسل رابط المصدر الجديد:")
+        return
+    if data.startswith("logo_"):
+        sid = data[5:]
+        context.user_data["edit"] = ("logo", sid, chat_id, msg_id)
+        await q.edit_message_text("🖼 أرسل رابط الشعار (أو /skip):")
+        return
+    if data.startswith("ua_"):
+        sid = data[3:]
+        context.user_data["edit"] = ("ua", sid, chat_id, msg_id)
+        await q.edit_message_text("🕵️ أرسل User-Agent (أو /skip):")
+        return
+    if data.startswith("rename_"):
+        sid = data[7:]
+        context.user_data["edit"] = ("rename", sid, chat_id, msg_id)
+        await q.edit_message_text("✏️ أرسل الاسم الجديد:")
+        return
+    if data.startswith("rtmpsrv_"):
+        sid = data[8:]
+        context.user_data["edit"] = ("rtmp_server", sid, chat_id, msg_id)
+        await q.edit_message_text("📡 أرسل خادم RTMP:")
+        return
+    if data.startswith("rtmpkey_"):
+        sid = data[8:]
+        context.user_data["edit"] = ("rtmp_key", sid, chat_id, msg_id)
+        await q.edit_message_text("🔑 أرسل مفتاح RTMP:")
+        return
+
+    if data.startswith("mode_"):
+        sid = data[5:]
+        if sid in streams:
+            old = streams[sid]["mode"]
+            new = "encode" if old == "copy" else "copy"
+            streams[sid]["mode"] = new
+            save()
+            await q.answer(f"✅ تم التبديل إلى {'ترميز' if new=='encode' else 'نسخ'}")
+            if streams[sid].get("active"):
+                await stop_stream(sid, context.bot)
+                asyncio.create_task(start_stream(sid, context.bot))
+            else:
+                await update_panel(sid, context.bot)
+        else:
+            await q.answer("❌ خطأ", show_alert=True)
+        return
+
+    if data.startswith("del_"):
+        sid = data[4:]
+        await stop_stream(sid, context.bot)
+        if sid in streams:
+            del streams[sid]
+            save()
+        await q.edit_message_text("🗑 تم حذف البث", reply_markup=inline_main_menu())
+        return
+
+def inline_main_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📺 قائمة HLS", callback_data="list_hls")],
+        [InlineKeyboardButton("📡 قائمة RTMP", callback_data="list_rtmp")],
+        [InlineKeyboardButton("➕ إضافة بث", callback_data="add_stream")],
+        [InlineKeyboardButton("🖥 مراقبة السيرفر", callback_data="monitor")],
+        [InlineKeyboardButton("🧹 تنظيف الملفات", callback_data="clean")]
+    ])
+
+# ========== معالجة الرسائل النصية ==========
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global monitor_active, monitor_task
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("🚫 غير مصرح")
+        return
+    text = update.message.text
+    chat_id = update.message.chat_id
+
+    # أزرار الرد الرئيسية
+    if text == "📺 HLS":
+        await update.message.reply_text("📺 قائمة HLS:", reply_markup=streams_list("hls"))
+        return
+    if text == "📡 RTMP":
+        await update.message.reply_text("📡 قائمة RTMP:", reply_markup=streams_list("rtmp"))
+        return
+    if text == "➕ إضافة":
+        context.user_data["step"] = "add_name"
+        await update.message.reply_text("📝 أرسل اسم البث الجديد:")
+        return
+    if text == "🖥 مراقبة":
+        if monitor_active:
+            monitor_active = False
+            if monitor_task: monitor_task.cancel()
+            await update.message.reply_text(system_status(), reply_markup=reply_kb)
+            return
+        status = system_status()
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⏹ إيقاف المراقبة", callback_data="stop_monitor")]])
+        msg = await update.message.reply_text(status, reply_markup=kb)
+        monitor_active = True
+        monitor_task = asyncio.create_task(monitor_loop(context.bot, msg.chat_id, msg.message_id))
+        return
+    if text == "🧹 تنظيف":
+        shutil.rmtree(HLS_DIR, ignore_errors=True)
+        os.makedirs(HLS_DIR, exist_ok=True)
+        await update.message.reply_text("✅ تم تنظيف مجلد HLS")
+        return
+
+    # إضافة بث جديد: الاسم
+    if context.user_data.get("step") == "add_name":
+        name = text.strip()
+        sid = name.replace(" ", "_")
+        if sid in streams:
+            c = 1
+            while f"{sid}_{c}" in streams:
+                c += 1
+            sid = f"{sid}_{c}"
+        streams[sid] = {
+            "name": name, "source": "", "type": "hls", "mode": "copy", "active": False,
+            "fps": "?", "ua": "ExoPlayerLib/2.18.5", "logo": "", "rtmp_server": "",
+            "rtmp_key": "", "chat_id": None, "message_id": None, "start_time": 0
+        }
+        save()
+        context.user_data["step"] = "add_source"
+        context.user_data["sid"] = sid
+        await update.message.reply_text("📥 أرسل رابط المصدر:")
+        return
+
+    # إضافة بث جديد: المصدر
+    if context.user_data.get("step") == "add_source":
+        sid = context.user_data.get("sid")
+        if sid and sid in streams:
+            streams[sid]["source"] = text
+            save()
+            context.user_data.pop("step")
+            context.user_data.pop("sid")
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("HLS", callback_data=f"settype_{sid}_hls")],
+                [InlineKeyboardButton("RTMP", callback_data=f"settype_{sid}_rtmp")]
+            ])
+            await update.message.reply_text("اختر نوع البث:", reply_markup=kb)
+        else:
+            await update.message.reply_text("❌ خطأ")
+        return
+
+    # تعديل بيانات بث موجود
+    if context.user_data.get("edit"):
+        typ, sid, edit_chat, edit_msg = context.user_data["edit"]
+        s = streams.get(sid)
+        if s:
+            if typ == "source": s["source"] = text
+            elif typ == "logo": s["logo"] = "" if text == "/skip" else text
+            elif typ == "ua": s["ua"] = "ExoPlayerLib/2.18.5" if text == "/skip" else text
+            elif typ == "rename": s["name"] = text
+            elif typ == "rtmp_server": s["rtmp_server"] = text
+            elif typ == "rtmp_key": s["rtmp_key"] = text
+            save()
+            context.user_data.pop("edit")
+            await update_panel(sid, context.bot)
+            await update.message.delete()
+        return
+
+    # إذا كتب المستخدم اسم بث موجود، نفتح لوحة تحكم له
+    for sid, s in streams.items():
+        if s["name"] == text:
+            if monitor_active:
+                monitor_active = False
+                if monitor_task: monitor_task.cancel()
+            await update.message.reply_text(
+                get_panel_text(sid),
+                reply_markup=panel_keyboard(sid, s),
+                parse_mode="Markdown"
+            )
+            return
+    await update.message.reply_text("❌ اختر من الأزرار أو أرسل اسم بث موجود")
+
+# ========== تحديد نوع البث ==========
+async def set_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    d = q.data
-    name = context.user_data.get("new_name", "بث")
-    context.user_data["mode"] = None
-
-    if d == "newtype_hls":
-        stream_type = "hls"
+    _, sid, typ = q.data.split("_", 2)
+    if sid in streams:
+        streams[sid]["type"] = typ
+        if typ == "rtmp":
+            context.user_data["edit"] = ("rtmp_server", sid, q.message.chat_id, q.message.message_id)
+            await q.edit_message_text("📡 أرسل خادم RTMP:")
+        else:
+            save()
+            await update_panel(sid, context.bot)
     else:
-        stream_type = "rtmp"
+        await q.edit_message_text("❌ خطأ")
 
-    raw_name = name.replace(' ', '_')
-    sid = raw_name if raw_name not in streams else f"{raw_name}_{int(time.time())}"
-    streams[sid] = {
-        "name": name, "source": "", "logo": "", "user_agent": "",
-        "active": False, "process": None, "fallback": False,
-        "source_online": False, "viewers": set(), "last_fps": "?",
-        "uptime": "00:00:00", "start_time": 0,
-        "panel_msg_id": None, "panel_chat_id": None,
-        "mode": "transcode", "rtmp_server": "", "rtmp_key": "",
-        "type": stream_type
-    }
-    save_streams()
-    await q.edit_message_text(f"✅ تم إضافة بث {stream_type.upper()} **{name}**", reply_markup=main_menu())
+# ========== أمر البدء ==========
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("🚫 غير مصرح")
+        return
+    await update.message.reply_text(
+        "🎬 **بوت البث المباشر - الإدارة الكاملة**\n\n"
+        "📌 الأزرار السفلية للقوائم.\n"
+        "➕ إضافة بث جديد.\n"
+        "📺 HLS: بث لمتصفحات / أجهزة.\n"
+        "📡 RTMP: بث لـ YouTube / Facebook / Twitch.\n"
+        "⚙️ الترميز: جودة عالية (1080p, 9000k).\n\n"
+        "استخدم الأزرار أدناه:",
+        reply_markup=reply_kb
+    )
 
-async def extra_button_handler(update, context):
-    q = update.callback_query
-    d = q.data
-    if d.startswith("newtype_"):
-        await newtype_callback(update, context)
-    else:
-        await button_handler(update, context)
-
-if __name__ == "__main__":
+# ========== التشغيل ==========
+def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.create_task(start_http_server())
+    loop.create_task(start_http())
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(extra_button_handler, pattern="^newtype_"))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
-    logger.info("Rplay UI Enhanced Final")
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add_handler(CallbackQueryHandler(callback_handler, pattern="^(?!settype_).*"))
+    app.add_handler(CallbackQueryHandler(set_type_callback, pattern="^settype_"))
+
+    print("🚀 البوت يعمل...")
     app.run_polling()
+
+if __name__ == "__main__":
+    main()
