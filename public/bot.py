@@ -163,7 +163,7 @@ async def update_panel(sid, bot):
         await bot.edit_message_text(text, s["chat_id"], s["msg_id"], reply_markup=panel_keyboard(sid, s))
     except: pass
 
-# ========== تشغيل البث (نسخة من Rplay Server الناجح) ==========
+# ========== تشغيل البث ==========
 async def start_stream(sid, bot):
     s = streams[sid]
     src = s["source"]
@@ -178,9 +178,7 @@ async def start_stream(sid, bot):
     os.makedirs(out_dir, exist_ok=True)
     out_file = os.path.join(out_dir, "index.m3u8")
 
-    # Rplay Server الأصلي كان يستخدم هذه الأوامر بالضبط للترميز
     if mode == "copy":
-        # وضع النسخ
         cmd = [
             "ffmpeg", "-re",
             "-user_agent", ua,
@@ -197,7 +195,6 @@ async def start_stream(sid, bot):
             rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
             cmd += ["-f", "flv", "-y", rtmp_url]
     else:
-        # وضع الترميز (نفس أوامر Rplay Server التي كانت تعمل)
         if logo and len(logo) > 5:
             cmd = [
                 "ffmpeg", "-re",
@@ -235,7 +232,6 @@ async def start_stream(sid, bot):
             rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
             cmd += ["-f", "flv", "-y", rtmp_url]
 
-    # قتل العملية السابقة
     if sid in processes:
         try:
             processes[sid].terminate()
@@ -243,7 +239,6 @@ async def start_stream(sid, bot):
             processes[sid].kill()
         except: pass
 
-    # تشغيل العملية
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     processes[sid] = proc
     s["active"] = True
@@ -251,7 +246,6 @@ async def start_stream(sid, bot):
     save()
     await update_panel(sid, bot)
 
-    # قراءة stderr لاستخراج FPS
     async def read_stderr():
         while True:
             line = await proc.stderr.readline()
@@ -423,6 +417,7 @@ async def callback(update, context):
         return
 
 async def handle_text(update, context):
+    global monitor_active, monitor_task
     if update.effective_user.id != ADMIN_ID: return
     text = update.message.text
 
