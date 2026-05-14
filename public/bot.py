@@ -4,14 +4,13 @@ import os
 import re
 import shutil
 import time
-import aiohttp
 from collections import defaultdict
 
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# ========== الإعدادات ==========
+# ========== الإعدادات الأساسية ==========
 with open("settings.json") as f:
     cfg = json.load(f)
 TOKEN = cfg["TOKEN"]
@@ -21,7 +20,6 @@ PORT = 8080
 
 HLS_DIR = "/tmp/hls"
 STREAMS_FILE = "streams.json"
-
 os.makedirs(HLS_DIR, exist_ok=True)
 
 streams = {}
@@ -37,7 +35,7 @@ if os.path.exists(STREAMS_FILE):
             s["viewers"] = set(s["viewers"])
         s.setdefault("fps", "?")
         s.setdefault("logo", "")
-        s.setdefault("ua", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        s.setdefault("ua", "Mozilla/5.0")
         s.setdefault("rtmp_server", "")
         s.setdefault("rtmp_key", "")
         s.setdefault("type", "hls")
@@ -89,7 +87,7 @@ def system_status():
     except:
         return f"Streams: {len(streams)}"
 
-# ========== مراقبة السيرفر ==========
+# ========== مراقبة السيرفر (تحديث كل 2 ثانية) ==========
 monitor_active = False
 monitor_task = None
 
@@ -104,7 +102,7 @@ async def monitor_loop(bot, chat_id, msg_id):
             pass
         await asyncio.sleep(2)
 
-# ========== واجهة البوت ==========
+# ========== واجهة المستخدم ==========
 reply_kb = ReplyKeyboardMarkup([
     ["📺 HLS", "📡 RTMP"],
     ["➕ إضافة", "🖥 مراقبة"],
@@ -155,35 +153,14 @@ async def update_panel(sid, bot):
         await bot.edit_message_text(text, s["chat_id"], s["msg_id"], reply_markup=panel_keyboard(sid, s))
     except: pass
 
-# ========== دالة للتحقق من صحة الرابط ==========
-async def check_url(url):
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10, allow_redirects=True) as resp:
-                return resp.status == 200
-    except:
-        return False
-
-# ========== تشغيل البث (مع تحسينات قوية) ==========
+# ========== دالة تشغيل البث (بسيطة وآمنة لـ ffmpeg 7) ==========
 async def start_stream(sid, bot):
     s = streams[sid]
     src = s["source"]
     mode = s["mode"]
-    ua = s.get("ua", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    ua = s.get("ua", "Mozilla/5.0")
     logo = s.get("logo", "")
     typ = s["type"]
-
-    # التحقق من صحة رابط المصدر قبل البدء
-    if typ == "hls":
-        if not await check_url(src):
-            await bot.send_message(s["chat_id"], f"❌ فشل الاتصال بالمصدر: {src}\nالرابط لا يعمل أو لا يمكن الوصول إليه.")
-            return
-
-    # التحقق من صحة إعدادات RTMP
-    if typ == "rtmp":
-        if not s.get("rtmp_server") or not s.get("rtmp_key"):
-            await bot.send_message(s["chat_id"], "❌ إعدادات RTMP غير مكتملة (خادم أو مفتاح).")
-            return
 
     out_dir = os.path.join(HLS_DIR, sid)
     if os.path.exists(out_dir):
@@ -191,41 +168,32 @@ async def start_stream(sid, bot):
     os.makedirs(out_dir, exist_ok=True)
     out_file = os.path.join(out_dir, "index.m3u8")
 
-    # إعدادات ffmpeg الأساسية والقوية (مقاومة للأخطاء)
-    base_cmd = [
+    # أوامر ffmpeg الأساسية والمجربة
+    base = [
         "ffmpeg", "-re",
         "-i", src,
         "-user_agent", ua,
         "-reconnect", "1",
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "5",
-        "-timeout", "20000000",
-        "-rw_timeout", "20000000",
-        "-analyzeduration", "10000000",
-        "-probesize", "100000000",
-        "-fflags", "nobuffer+genpts",
-        "-protocol_whitelist", "file,http,https,tcp,tls,crypto"
+        "-analyzeduration", "5000000",
+        "-probesize", "50000000",
+        "-fflags", "nobuffer+genpts"
     ]
 
     if mode == "copy":
-        cmd = base_cmd + ["-c:v", "copy", "-c:a", "copy"]
+        cmd = base + ["-c:v", "copy", "-c:a", "copy"]
     else:
-        video_opts = [
+        video = [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
             "-g", "90", "-vsync", "cfr", "-r", "30"
         ]
         if logo and len(logo) > 5:
-            # يجب التأكد من صحة رابط الشعار أيضاً
-            if not await check_url(logo):
-                logo = ""  # تجاهل الشعار إذا كان الرابط لا يعمل
-            if logo:
-                video_opts = ["-i", logo, "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0"] + video_opts
-            else:
-                video_opts = ["-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"] + video_opts
+            video = ["-i", logo, "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0"] + video
         else:
-            video_opts = ["-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"] + video_opts
-        cmd = base_cmd + video_opts + ["-c:a", "aac", "-b:a", "128k"]
+            video = ["-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"] + video
+        cmd = base + video + ["-c:a", "aac", "-b:a", "128k"]
 
     if typ == "hls":
         cmd += ["-f", "hls", "-hls_time", "2", "-hls_list_size", "5", "-hls_flags", "delete_segments", "-y", out_file]
@@ -256,12 +224,10 @@ async def start_stream(sid, bot):
             if m:
                 s["fps"] = m.group(1)
                 await update_panel(sid, bot)
-            # طباعة الأخطاء المهمة فقط
-            if "error" in txt.lower() and not "deprecated pixel format" in txt.lower():
+            if "error" in txt.lower() and "deprecated" not in txt.lower():
                 print(f"[{sid}] {txt}")
     asyncio.create_task(read_stderr())
     await proc.wait()
-
     s["active"] = False
     processes.pop(sid, None)
     save()
@@ -432,7 +398,6 @@ async def handle_text(update, context):
         await update.message.reply_text("✅ تم التنظيف")
         return
 
-    # إضافة بث جديد
     if context.user_data.get("step") == "add_name":
         name = text.strip()
         sid = name.replace(" ", "_")
@@ -440,7 +405,11 @@ async def handle_text(update, context):
             c = 1
             while f"{sid}_{c}" in streams: c+=1
             sid = f"{sid}_{c}"
-        streams[sid] = {"name": name, "source": "", "type": "hls", "mode": "copy", "active": False, "fps": "?", "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "logo": "", "rtmp_server": "", "rtmp_key": "", "chat_id": None, "msg_id": None, "start_time": 0}
+        streams[sid] = {
+            "name": name, "source": "", "type": "hls", "mode": "copy", "active": False,
+            "fps": "?", "ua": "Mozilla/5.0", "logo": "", "rtmp_server": "", "rtmp_key": "",
+            "chat_id": None, "msg_id": None, "start_time": 0
+        }
         save()
         context.user_data["step"] = "add_source"
         context.user_data["sid"] = sid
@@ -449,51 +418,26 @@ async def handle_text(update, context):
     if context.user_data.get("step") == "add_source":
         sid = context.user_data.get("sid")
         if sid in streams:
-            # التحقق من صحة الرابط قبل الحفظ
-            if not await check_url(text):
-                await update.message.reply_text("⚠️ الرابط الذي أدخلته قد لا يعمل. هل تريد المتابعة؟ (أرسل 'نعم' للمتابعة أو أي شيء آخر للإلغاء)")
-                context.user_data["waiting_for_confirm"] = sid
-                context.user_data["pending_url"] = text
-                return
             streams[sid]["source"] = text
             save()
             context.user_data.pop("step")
             context.user_data.pop("sid")
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("HLS", callback_data=f"settype_{sid}_hls"), InlineKeyboardButton("RTMP", callback_data=f"settype_{sid}_rtmp")]])
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("HLS", callback_data=f"settype_{sid}_hls")],
+                [InlineKeyboardButton("RTMP", callback_data=f"settype_{sid}_rtmp")]
+            ])
             await update.message.reply_text("اختر النوع:", reply_markup=kb)
         else:
             await update.message.reply_text("❌ خطأ")
         return
 
-    if context.user_data.get("waiting_for_confirm"):
-        sid = context.user_data["waiting_for_confirm"]
-        if text == "نعم":
-            streams[sid]["source"] = context.user_data["pending_url"]
-            save()
-            context.user_data.pop("waiting_for_confirm")
-            context.user_data.pop("pending_url")
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("HLS", callback_data=f"settype_{sid}_hls"), InlineKeyboardButton("RTMP", callback_data=f"settype_{sid}_rtmp")]])
-            await update.message.reply_text("تم حفظ الرابط رغم التحذير. اختر النوع:", reply_markup=kb)
-        else:
-            context.user_data.pop("waiting_for_confirm")
-            context.user_data.pop("pending_url")
-            await update.message.reply_text("تم إلغاء الإضافة. استخدم '➕ إضافة' مرة أخرى.")
-        return
-
-    # تعديل بيانات البث
     if context.user_data.get("edit"):
         typ, sid, edit_chat, edit_msg = context.user_data["edit"]
         s = streams.get(sid)
         if s:
-            if typ == "source":
-                # التحقق من صحة الرابط الجديد
-                if not await check_url(text):
-                    await update.message.reply_text("⚠️ الرابط الجديد قد لا يعمل. هل تريد المتابعة؟ (أرسل 'نعم' للمتابعة)")
-                    context.user_data["waiting_confirm_edit"] = (typ, sid, text, edit_chat, edit_msg)
-                    return
-                s["source"] = text
+            if typ == "source": s["source"] = text
             elif typ == "logo": s["logo"] = "" if text == "/skip" else text
-            elif typ == "ua": s["ua"] = text if text != "/skip" else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            elif typ == "ua": s["ua"] = text if text != "/skip" else "Mozilla/5.0"
             elif typ == "name": s["name"] = text
             elif typ == "rtmp_server": s["rtmp_server"] = text
             elif typ == "rtmp_key": s["rtmp_key"] = text
@@ -501,19 +445,6 @@ async def handle_text(update, context):
             context.user_data.pop("edit")
             await update_panel(sid, context.bot)
             await update.message.delete()
-        return
-
-    if context.user_data.get("waiting_confirm_edit"):
-        typ, sid, url, edit_chat, edit_msg = context.user_data["waiting_confirm_edit"]
-        if text == "نعم":
-            streams[sid]["source"] = url
-            save()
-            await update.message.reply_text("تم تحديث المصدر رغم التحذير.")
-            await update_panel(sid, context.bot)
-            await update.message.delete()
-        else:
-            await update.message.reply_text("تم إلغاء التحديث.")
-        context.user_data.pop("waiting_confirm_edit")
         return
 
 async def set_type(update, context):
