@@ -22,14 +22,6 @@ ADMIN_ID = cfg["ADMIN_ID"]
 BASE_URL = cfg.get("BASE_URL", "http://164.68.102.28")
 PORT = cfg.get("PORT", 8080)
 
-# إعدادات ffmpeg حسب التوصيات
-VIDEO_BITRATE = "9000k"
-AUDIO_BITRATE = "128k"
-PRESET = "veryfast"  # توازن بين الجودة والسرعة
-CRF = 23
-THREADS = 2
-KEYFRAME_INTERVAL = 90  # 30fps * 3 seconds
-
 HLS_DIR = "/tmp/hls"
 STREAMS_FILE = "streams.json"
 
@@ -42,8 +34,6 @@ viewer_last = defaultdict(dict)
 
 monitor_active = False
 monitor_task = None
-monitor_chat_id = None
-monitor_msg_id = None
 
 if os.path.exists(STREAMS_FILE):
     with open(STREAMS_FILE) as f:
@@ -134,20 +124,9 @@ async def monitor_loop(bot, chat_id, message_id):
                 reply_markup=kb,
                 parse_mode="Markdown"
             )
-        except Exception as e:
-            if "Message is not modified" not in str(e):
-                pass
-        await asyncio.sleep(1)  # تحديث كل ثانية
-    # عند الخروج، نعيد القائمة
-    try:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=system_status(),
-            reply_markup=inline_main(),
-            parse_mode="Markdown"
-        )
-    except: pass
+        except:
+            pass
+        await asyncio.sleep(1)
 
 # =========================================
 # UI
@@ -235,7 +214,7 @@ async def update_panel(sid, bot):
             print(f"Panel update error: {e}")
 
 # =========================================
-# FFMPEG STREAM (optimized according to recommendations)
+# FFMPEG STREAM (بالضبط مثل Rplay Server الناجح)
 # =========================================
 async def start_stream(sid, bot):
     s = streams[sid]
@@ -251,14 +230,14 @@ async def start_stream(sid, bot):
     os.makedirs(stream_dir, exist_ok=True)
     out_file = os.path.join(stream_dir, "index.m3u8")
 
-    # Base options: reconnect, timeout, etc.
+    # إعدادات ffmpeg القياسية التي تعمل
     base = [
-        "ffmpeg", "-loglevel", "warning", "-re",
+        "ffmpeg", "-re",
         "-user_agent", ua,
         "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
         "-timeout", "10000000", "-rw_timeout", "10000000",
         "-fflags", "+genpts+discardcorrupt",
-        "-analyzeduration", "500000", "-probesize", "5000000",
+        "-analyzeduration", "1000000", "-probesize", "5000000",
         "-i", src
     ]
 
@@ -266,31 +245,40 @@ async def start_stream(sid, bot):
         video = ["-c:v", "copy"]
         filter_cmd = []
     else:
-        # Transcode with recommended settings
+        # وضع الترميز (جودة عالية)
         video = [
-            "-c:v", "libx264", "-preset", PRESET, "-crf", str(CRF),
-            "-b:v", VIDEO_BITRATE, "-maxrate", VIDEO_BITRATE, "-bufsize", str(2 * int(VIDEO_BITRATE[:-1]) * 1000) + "k",
-            "-g", str(KEYFRAME_INTERVAL), "-keyint_min", str(KEYFRAME_INTERVAL),
-            "-vsync", "cfr", "-r", "30",
-            "-threads", str(THREADS)
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
+            "-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease",
+            "-g", "90", "-vsync", "cfr", "-r", "30"
         ]
         if logo and len(logo) > 5:
-            # Fullscreen logo using scale2ref
+            # إضافة الشعار على كامل الشاشة
             filter_cmd = ["-i", logo, "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0"]
         else:
-            filter_cmd = ["-filter_complex", "[0:v]scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"]
+            filter_cmd = []
 
-    audio = ["-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ar", "44100", "-ac", "2"]
+    audio = ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
 
     if typ == "hls":
-        cmd = base + filter_cmd + video + audio + [
-            "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
-            "-hls_flags", "delete_segments", "-y", out_file
-        ]
+        if filter_cmd:
+            cmd = base + filter_cmd + video + audio + [
+                "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+                "-hls_flags", "delete_segments", "-y", out_file
+            ]
+        else:
+            cmd = base + video + audio + [
+                "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+                "-hls_flags", "delete_segments", "-y", out_file
+            ]
     else:
         rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
-        cmd = base + filter_cmd + video + audio + ["-f", "flv", "-y", rtmp_url]
+        if filter_cmd:
+            cmd = base + filter_cmd + video + audio + ["-f", "flv", "-y", rtmp_url]
+        else:
+            cmd = base + video + audio + ["-f", "flv", "-y", rtmp_url]
 
+    # قتل العملية السابقة إن وجدت
     if sid in processes:
         try:
             processes[sid].terminate()
@@ -305,25 +293,19 @@ async def start_stream(sid, bot):
     save()
     await update_panel(sid, bot)
 
-    # Continuously read stderr to extract fps
+    # قراءة stderr لاستخراج FPS وتحديث اللوحة
     async def stderr_reader():
         while True:
             line = await proc.stderr.readline()
             if not line:
                 break
             txt = line.decode(errors="ignore").strip()
-            # Search for fps pattern
             match = re.search(r"fps=\s*([\d.]+)", txt)
             if match:
                 s["fps"] = match.group(1)
                 await update_panel(sid, bot)
-            # Also search for time (optional)
-            if "time=" in txt:
-                # could extract time but not necessary
-                pass
     asyncio.create_task(stderr_reader())
 
-    # Wait for the process to finish (will run until stopped)
     await proc.wait()
     s["active"] = False
     processes.pop(sid, None)
@@ -517,7 +499,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📝 أرسل اسم البث الجديد:")
         return
     if text == "🖥 مراقبة السيرفر":
-        # بدء مراقبة السيرفر
         if monitor_active:
             monitor_active = False
             if monitor_task:
@@ -539,7 +520,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ تم تنظيف الملفات")
         return
 
-    # Add stream - name
+    # إضافة بث - الاسم
     if context.user_data.get("step") == "add_name":
         name = text.strip()
         sid = name.replace(" ", "_")
@@ -559,7 +540,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📥 أرسل رابط المصدر:")
         return
 
-    # Add stream - source
+    # إضافة بث - المصدر
     if context.user_data.get("step") == "add_source":
         sid = context.user_data.get("sid")
         if sid in streams:
@@ -576,7 +557,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ خطأ")
         return
 
-    # Edit stream parameters
+    # تعديل بيانات البث
     if context.user_data.get("edit"):
         typ, sid, edit_chat, edit_msg = context.user_data["edit"]
         s = streams.get(sid)
