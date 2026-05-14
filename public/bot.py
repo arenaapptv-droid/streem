@@ -22,10 +22,10 @@ ADMIN_ID = cfg["ADMIN_ID"]
 BASE_URL = cfg.get("BASE_URL", "http://164.68.102.28")
 PORT = cfg.get("PORT", 8080)
 
-VIDEO_BITRATE = cfg.get("VIDEO_BITRATE", "8000k")
+VIDEO_BITRATE = cfg.get("VIDEO_BITRATE", "4000k")
 AUDIO_BITRATE = cfg.get("AUDIO_BITRATE", "128k")
 PRESET = cfg.get("PRESET", "ultrafast")
-CRF = cfg.get("CRF", 24)
+CRF = cfg.get("CRF", 28)
 THREADS = cfg.get("THREADS", 1)
 TUNE = cfg.get("TUNE", "fastdecode")
 
