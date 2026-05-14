@@ -22,12 +22,13 @@ ADMIN_ID = cfg["ADMIN_ID"]
 BASE_URL = cfg.get("BASE_URL", "http://164.68.102.28")
 PORT = cfg.get("PORT", 8080)
 
-VIDEO_BITRATE = cfg.get("VIDEO_BITRATE", "4000k")
-AUDIO_BITRATE = cfg.get("AUDIO_BITRATE", "128k")
-PRESET = cfg.get("PRESET", "ultrafast")
-CRF = cfg.get("CRF", 28)
-THREADS = cfg.get("THREADS", 1)
-TUNE = cfg.get("TUNE", "fastdecode")
+# إعدادات ffmpeg حسب التوصيات
+VIDEO_BITRATE = "9000k"
+AUDIO_BITRATE = "128k"
+PRESET = "veryfast"  # توازن بين الجودة والسرعة
+CRF = 23
+THREADS = 2
+KEYFRAME_INTERVAL = 90  # 30fps * 3 seconds
 
 HLS_DIR = "/tmp/hls"
 STREAMS_FILE = "streams.json"
@@ -39,7 +40,6 @@ processes = {}
 viewers = defaultdict(set)
 viewer_last = defaultdict(dict)
 
-# متغيرات مراقبة السيرفر
 monitor_active = False
 monitor_task = None
 monitor_chat_id = None
@@ -116,9 +116,9 @@ def system_status():
         return f"📺 البثوث: {len(streams)}"
 
 # =========================================
-# مراقبة السيرفر (تحديث كل ثانية)
+# MONITOR SERVER (updates every second)
 # =========================================
-async def monitor_loop(update, context, chat_id, message_id):
+async def monitor_loop(bot, chat_id, message_id):
     global monitor_active
     while monitor_active:
         status = system_status()
@@ -127,7 +127,7 @@ async def monitor_loop(update, context, chat_id, message_id):
             [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")]
         ])
         try:
-            await context.bot.edit_message_text(
+            await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
                 text=status,
@@ -138,8 +138,9 @@ async def monitor_loop(update, context, chat_id, message_id):
             if "Message is not modified" not in str(e):
                 pass
         await asyncio.sleep(1)  # تحديث كل ثانية
+    # عند الخروج، نعيد القائمة
     try:
-        await context.bot.edit_message_text(
+        await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text=system_status(),
@@ -229,10 +230,12 @@ async def update_panel(sid, bot):
     try:
         await bot.edit_message_text(text, chat_id=s["chat_id"], message_id=s["message_id"],
                                     reply_markup=panel_keyboard(sid, s), parse_mode="Markdown")
-    except: pass
+    except Exception as e:
+        if "Message is not modified" not in str(e):
+            print(f"Panel update error: {e}")
 
 # =========================================
-# FFMPEG STREAM (مع تحديث تلقائي)
+# FFMPEG STREAM (optimized according to recommendations)
 # =========================================
 async def start_stream(sid, bot):
     s = streams[sid]
@@ -248,6 +251,7 @@ async def start_stream(sid, bot):
     os.makedirs(stream_dir, exist_ok=True)
     out_file = os.path.join(stream_dir, "index.m3u8")
 
+    # Base options: reconnect, timeout, etc.
     base = [
         "ffmpeg", "-loglevel", "warning", "-re",
         "-user_agent", ua,
@@ -262,9 +266,16 @@ async def start_stream(sid, bot):
         video = ["-c:v", "copy"]
         filter_cmd = []
     else:
-        video = ["-c:v", "libx264", "-preset", PRESET, "-crf", str(CRF),
-                 "-b:v", VIDEO_BITRATE, "-threads", str(THREADS), "-tune", TUNE]
+        # Transcode with recommended settings
+        video = [
+            "-c:v", "libx264", "-preset", PRESET, "-crf", str(CRF),
+            "-b:v", VIDEO_BITRATE, "-maxrate", VIDEO_BITRATE, "-bufsize", str(2 * int(VIDEO_BITRATE[:-1]) * 1000) + "k",
+            "-g", str(KEYFRAME_INTERVAL), "-keyint_min", str(KEYFRAME_INTERVAL),
+            "-vsync", "cfr", "-r", "30",
+            "-threads", str(THREADS)
+        ]
         if logo and len(logo) > 5:
+            # Fullscreen logo using scale2ref
             filter_cmd = ["-i", logo, "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0"]
         else:
             filter_cmd = ["-filter_complex", "[0:v]scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"]
@@ -294,18 +305,25 @@ async def start_stream(sid, bot):
     save()
     await update_panel(sid, bot)
 
+    # Continuously read stderr to extract fps
     async def stderr_reader():
         while True:
             line = await proc.stderr.readline()
-            if not line: break
-            txt = line.decode(errors="ignore")
-            m = re.search(r"fps=\s*([\d.]+)", txt)
-            if m:
-                s["fps"] = m.group(1)
+            if not line:
+                break
+            txt = line.decode(errors="ignore").strip()
+            # Search for fps pattern
+            match = re.search(r"fps=\s*([\d.]+)", txt)
+            if match:
+                s["fps"] = match.group(1)
                 await update_panel(sid, bot)
-            await asyncio.sleep(0.5)
+            # Also search for time (optional)
+            if "time=" in txt:
+                # could extract time but not necessary
+                pass
     asyncio.create_task(stderr_reader())
 
+    # Wait for the process to finish (will run until stopped)
     await proc.wait()
     s["active"] = False
     processes.pop(sid, None)
@@ -382,7 +400,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         await q.edit_message_text(status, reply_markup=kb, parse_mode="Markdown")
         monitor_active = True
-        monitor_task = asyncio.create_task(monitor_loop(update, context, chat_id, msg_id))
+        monitor_task = asyncio.create_task(monitor_loop(context.bot, chat_id, msg_id))
         return
     if data == "clean":
         shutil.rmtree(HLS_DIR, ignore_errors=True)
@@ -447,12 +465,12 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("rtmpsrv_"):
         sid = data[8:]
         context.user_data["edit"] = ("rtmp_server", sid, chat_id, msg_id)
-        await q.edit_message_text("📡 أرسل خادم RTMP (مثال: rtmp://live.twitch.tv/app):")
+        await q.edit_message_text("📡 أرسل خادم RTMP:")
         return
     if data.startswith("rtmpkey_"):
         sid = data[8:]
         context.user_data["edit"] = ("rtmp_key", sid, chat_id, msg_id)
-        await q.edit_message_text("🔑 أرسل مفتاح البث (stream key):")
+        await q.edit_message_text("🔑 أرسل مفتاح البث:")
         return
 
     if data.startswith("mode_"):
@@ -483,6 +501,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # TEXT HANDLER
 # =========================================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global monitor_active, monitor_task
     if update.effective_user.id != ADMIN_ID:
         return
     text = update.message.text
@@ -499,6 +518,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if text == "🖥 مراقبة السيرفر":
         # بدء مراقبة السيرفر
+        if monitor_active:
+            monitor_active = False
+            if monitor_task:
+                monitor_task.cancel()
+            await update.message.reply_text(system_status(), reply_markup=inline_main(), parse_mode="Markdown")
+            return
         status = system_status()
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("⏹ إيقاف المراقبة", callback_data="stop_monitor")],
@@ -506,7 +531,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         msg = await update.message.reply_text(status, reply_markup=kb, parse_mode="Markdown")
         monitor_active = True
-        monitor_task = asyncio.create_task(monitor_loop(update, context, msg.chat_id, msg.message_id))
+        monitor_task = asyncio.create_task(monitor_loop(context.bot, msg.chat_id, msg.message_id))
         return
     if text == "🧹 تنظيف الملفات":
         shutil.rmtree(HLS_DIR, ignore_errors=True)
@@ -514,7 +539,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ تم تنظيف الملفات")
         return
 
-    # إضافة بث - اسم
+    # Add stream - name
     if context.user_data.get("step") == "add_name":
         name = text.strip()
         sid = name.replace(" ", "_")
@@ -534,7 +559,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📥 أرسل رابط المصدر:")
         return
 
-    # إضافة بث - مصدر
+    # Add stream - source
     if context.user_data.get("step") == "add_source":
         sid = context.user_data.get("sid")
         if sid in streams:
@@ -551,7 +576,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ خطأ")
         return
 
-    # تعديل بيانات البث
+    # Edit stream parameters
     if context.user_data.get("edit"):
         typ, sid, edit_chat, edit_msg = context.user_data["edit"]
         s = streams.get(sid)
@@ -607,7 +632,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📺 قائمة HLS - عرض بثوث HLS\n"
         "📡 قائمة RTMP - عرض بثوث RTMP\n"
         "➕ إضافة بث - إضافة بث جديد\n"
-        "🖥 مراقبة السيرفر - مراقبة CPU/RAM/Disk\n"
+        "🖥 مراقبة السيرفر - مراقبة CPU/RAM/Disk (تحديث كل ثانية)\n"
         "🧹 تنظيف الملفات - حذف ملفات HLS المؤقتة\n\n"
         "اختر من الأزرار أدناه:",
         reply_markup=reply_kb
