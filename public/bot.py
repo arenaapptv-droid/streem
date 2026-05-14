@@ -22,7 +22,7 @@ ADMIN_ID = cfg["ADMIN_ID"]
 BASE_URL = cfg.get("BASE_URL", "http://164.68.102.28")
 PORT = cfg.get("PORT", 8080)
 
-# إعدادات الترميز (ثابتة في ملف settings.json)
+# إعدادات الترميز
 VIDEO_BITRATE = cfg.get("VIDEO_BITRATE", "4000k")
 AUDIO_BITRATE = cfg.get("AUDIO_BITRATE", "128k")
 PRESET = cfg.get("PRESET", "ultrafast")
@@ -186,7 +186,7 @@ async def update_panel(sid, bot):
     except: pass
 
 # =========================================
-# FFMPEG STREAM - باستخدام الإعدادات من settings.json
+# FFMPEG STREAM
 # =========================================
 async def start_stream(sid, bot):
     s = streams[sid]
@@ -196,7 +196,6 @@ async def start_stream(sid, bot):
     logo = s.get("logo", "")
     typ = s["type"]
 
-    # clean dir
     stream_dir = os.path.join(HLS_DIR, sid)
     if os.path.exists(stream_dir):
         shutil.rmtree(stream_dir, ignore_errors=True)
@@ -217,7 +216,6 @@ async def start_stream(sid, bot):
         video = ["-c:v", "copy"]
         filter_cmd = []
     else:
-        # استخدام الإعدادات من settings.json
         video = ["-c:v", "libx264", "-preset", PRESET, "-crf", str(CRF),
                  "-b:v", VIDEO_BITRATE, "-threads", str(THREADS), "-tune", TUNE]
         if logo and len(logo) > 5:
@@ -416,7 +414,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = update.message.text
 
-    # Adding new stream
     if context.user_data.get("step") == "add_name":
         name = text.strip()
         sid = name.replace(" ", "_")
@@ -452,7 +449,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Error")
         return
 
-    # Editing stream parameter
     if context.user_data.get("edit"):
         typ, sid, edit_chat, edit_msg = context.user_data["edit"]
         s = streams.get(sid)
@@ -497,7 +493,7 @@ async def set_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("❌ Error")
 
 # =========================================
-# START
+# START COMMAND
 # =========================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -506,17 +502,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎬 **Live Stream Bot**\nUse the buttons below.", reply_markup=reply_kb)
 
 # =========================================
-# MAIN
+# MAIN (FIXED EVENT LOOP)
 # =========================================
-async def main():
-    await start_http()
+def main():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.create_task(start_http())
+
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(callback, pattern="^(?!settype_).*"))
     app.add_handler(CallbackQueryHandler(set_type, pattern="^settype_"))
+
     print("🚀 Bot running...")
-    await app.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
