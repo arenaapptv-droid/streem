@@ -5,6 +5,7 @@ import re
 import shutil
 import time
 from collections import defaultdict
+
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -87,7 +88,7 @@ def system_status():
     except:
         return f"Streams: {len(streams)}"
 
-# ========== مراقبة السيرفر (تحديث كل ثانية) ==========
+# ========== مراقبة السيرفر ==========
 monitor_active = False
 monitor_task = None
 
@@ -162,7 +163,7 @@ async def update_panel(sid, bot):
         await bot.edit_message_text(text, s["chat_id"], s["msg_id"], reply_markup=panel_keyboard(sid, s))
     except: pass
 
-# ========== تشغيل البث (نسخة بسيطة من Rplay Server) ==========
+# ========== تشغيل البث (نسخة من Rplay Server الناجح) ==========
 async def start_stream(sid, bot):
     s = streams[sid]
     src = s["source"]
@@ -177,27 +178,64 @@ async def start_stream(sid, bot):
     os.makedirs(out_dir, exist_ok=True)
     out_file = os.path.join(out_dir, "index.m3u8")
 
-    # أوامر ffmpeg (نفس التي كانت تعمل في Rplay Server)
-    base = ["ffmpeg", "-re", "-user_agent", ua, "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5", "-rw_timeout", "10000000", "-fflags", "+genpts+discardcorrupt", "-analyzeduration", "1000000", "-probesize", "5000000", "-i", src]
-
+    # Rplay Server الأصلي كان يستخدم هذه الأوامر بالضبط للترميز
     if mode == "copy":
-        video = ["-c:v", "copy"]
-        filter_cmd = []
-    else:
-        video = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k", "-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease", "-g", "90", "-vsync", "cfr", "-r", "30"]
-        if logo and len(logo) > 5:
-            filter_cmd = ["-i", logo, "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0"]
+        # وضع النسخ
+        cmd = [
+            "ffmpeg", "-re",
+            "-user_agent", ua,
+            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+            "-rw_timeout", "10000000",
+            "-fflags", "+genpts+discardcorrupt",
+            "-i", src,
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+        ]
+        if typ == "hls":
+            cmd += ["-f", "hls", "-hls_time", "2", "-hls_list_size", "5", "-hls_flags", "delete_segments", "-y", out_file]
         else:
-            filter_cmd = []
-
-    audio = ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2"]
-
-    if typ == "hls":
-        cmd = base + filter_cmd + video + audio + ["-f", "hls", "-hls_time", "2", "-hls_list_size", "5", "-hls_flags", "delete_segments", "-y", out_file]
+            rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
+            cmd += ["-f", "flv", "-y", rtmp_url]
     else:
-        rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
-        cmd = base + filter_cmd + video + audio + ["-f", "flv", "-y", rtmp_url]
+        # وضع الترميز (نفس أوامر Rplay Server التي كانت تعمل)
+        if logo and len(logo) > 5:
+            cmd = [
+                "ffmpeg", "-re",
+                "-user_agent", ua,
+                "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+                "-rw_timeout", "10000000",
+                "-fflags", "+genpts+discardcorrupt",
+                "-i", src,
+                "-i", logo,
+                "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
+                "-vsync", "cfr", "-r", "30",
+                "-g", "90",
+                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-re",
+                "-user_agent", ua,
+                "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+                "-rw_timeout", "10000000",
+                "-fflags", "+genpts+discardcorrupt",
+                "-i", src,
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
+                "-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease",
+                "-vsync", "cfr", "-r", "30",
+                "-g", "90",
+                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+            ]
+        if typ == "hls":
+            cmd += ["-f", "hls", "-hls_time", "2", "-hls_list_size", "5", "-hls_flags", "delete_segments", "-y", out_file]
+        else:
+            rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
+            cmd += ["-f", "flv", "-y", rtmp_url]
 
+    # قتل العملية السابقة
     if sid in processes:
         try:
             processes[sid].terminate()
@@ -205,6 +243,7 @@ async def start_stream(sid, bot):
             processes[sid].kill()
         except: pass
 
+    # تشغيل العملية
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     processes[sid] = proc
     s["active"] = True
@@ -212,6 +251,7 @@ async def start_stream(sid, bot):
     save()
     await update_panel(sid, bot)
 
+    # قراءة stderr لاستخراج FPS
     async def read_stderr():
         while True:
             line = await proc.stderr.readline()
@@ -221,6 +261,8 @@ async def start_stream(sid, bot):
             if m:
                 s["fps"] = m.group(1)
                 await update_panel(sid, bot)
+            if "error" in txt.lower():
+                print(f"[{sid}] {txt.strip()}")
     asyncio.create_task(read_stderr())
 
     await proc.wait()
@@ -412,7 +454,6 @@ async def handle_text(update, context):
         await update.message.reply_text("تم التنظيف")
         return
 
-    # إضافة بث جديد
     if context.user_data.get("step") == "add_name":
         name = text.strip()
         sid = name.replace(" ", "_")
@@ -437,7 +478,6 @@ async def handle_text(update, context):
             await update.message.reply_text("اختر النوع:", reply_markup=kb)
         return
 
-    # تعديل بيانات البث
     if context.user_data.get("edit"):
         typ, sid, edit_chat, edit_msg = context.user_data["edit"]
         s = streams.get(sid)
