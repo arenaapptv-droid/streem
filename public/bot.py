@@ -4,7 +4,6 @@ import os
 import re
 import shutil
 import time
-import signal
 from collections import defaultdict
 
 from aiohttp import web
@@ -13,29 +12,23 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from telegram.error import BadRequest
 
 # =========================================
-# PSUTIL
-# =========================================
-try:
-    import psutil
-    PSUTIL_AVAILABLE = True
-except ImportError:
-    PSUTIL_AVAILABLE = False
-
-# =========================================
-# CONFIG
+# CONFIG - كل الإعدادات هنا
 # =========================================
 with open("settings.json") as f:
     cfg = json.load(f)
 
 TOKEN = cfg["TOKEN"]
 ADMIN_ID = cfg["ADMIN_ID"]
-BASE_URL = "http://164.68.102.28"
-PORT = 8080
+BASE_URL = cfg.get("BASE_URL", "http://164.68.102.28")
+PORT = cfg.get("PORT", 8080)
 
+# إعدادات الترميز (ثابتة في ملف settings.json)
 VIDEO_BITRATE = cfg.get("VIDEO_BITRATE", "4000k")
 AUDIO_BITRATE = cfg.get("AUDIO_BITRATE", "128k")
 PRESET = cfg.get("PRESET", "ultrafast")
 CRF = cfg.get("CRF", 28)
+THREADS = cfg.get("THREADS", 1)
+TUNE = cfg.get("TUNE", "fastdecode")
 
 HLS_DIR = "/tmp/hls"
 STREAMS_FILE = "streams.json"
@@ -46,9 +39,6 @@ streams = {}
 processes = {}
 viewers = defaultdict(set)
 viewer_last = defaultdict(dict)
-
-monitor_active = False
-monitor_task = None
 
 if os.path.exists(STREAMS_FILE):
     with open(STREAMS_FILE) as f:
@@ -67,7 +57,7 @@ if os.path.exists(STREAMS_FILE):
         s.setdefault("chat_id", None)
         s.setdefault("start_time", 0)
 
-def save_streams():
+def save():
     data = {}
     for sid, s in streams.items():
         tmp = s.copy()
@@ -79,21 +69,18 @@ def save_streams():
         json.dump(data, f, indent=2)
 
 # =========================================
-# HTTP SERVER (HLS)
+# HTTP SERVER
 # =========================================
-async def track_viewer(request, sid):
-    ip = request.headers.get("X-Forwarded-For", request.remote)
-    if ip:
-        viewers[sid].add(ip)
-        viewer_last[sid][ip] = time.time()
-
 async def hls_handler(request):
     sid = request.match_info["name"]
     filename = request.match_info.get("file", "index.m3u8")
     path = os.path.join(HLS_DIR, sid, filename)
     if not os.path.exists(path):
         return web.Response(status=404)
-    await track_viewer(request, sid)
+    ip = request.headers.get("X-Forwarded-For", request.remote)
+    if ip:
+        viewers[sid].add(ip)
+        viewer_last[sid][ip] = time.time()
     return web.FileResponse(path)
 
 async def start_http():
@@ -101,61 +88,49 @@ async def start_http():
     app.router.add_get("/live/{name}/{file:.*}", hls_handler)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    print(f"✅ HTTP on port {PORT}")
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
+    print(f"✅ HTTP on {PORT}")
 
 # =========================================
 # SYSTEM STATUS
 # =========================================
 def system_status():
-    if PSUTIL_AVAILABLE:
+    try:
+        import psutil
         cpu = psutil.cpu_percent()
         mem = psutil.virtual_memory()
-        disk = psutil.disk_usage("/")
-        return (
-            f"🖥️ CPU: {cpu}%\n"
-            f"🧠 RAM: {mem.percent}% ({mem.used//(1024**2)}/{mem.total//(1024**2)} MB)\n"
-            f"💾 Disk: {disk.percent}% ({disk.used//(1024**3)}/{disk.total//(1024**3)} GB)\n"
-            f"📺 Streams: {len(streams)}"
-        )
-    else:
-        load = "N/A"
-        try:
-            with open("/proc/loadavg") as f:
-                load = f.read().split()[0]
-        except: pass
-        return f"🖥️ Load: {load}\n📺 Streams: {len(streams)}"
+        return f"🖥 CPU: {cpu}%\n🧠 RAM: {mem.percent}%\n📺 Streams: {len(streams)}"
+    except:
+        return f"📺 Streams: {len(streams)}"
 
 # =========================================
-# STREAM PANEL
+# UI
 # =========================================
-def get_panel_text(sid):
-    s = streams.get(sid)
-    if not s:
-        return "❌ Stream not found"
-    uptime = "00:00:00"
-    if s.get("start_time"):
-        uptime = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
-    viewers_count = len(viewers.get(sid, set()))
-    text = (
-        f"🎛️ **{s['name']}**\n"
-        f"📥 Source: `{s['source']}`\n"
-        f"🖼 Logo: {'✅' if s.get('logo') else '❌'}\n"
-        f"🕵️ UA: `{s.get('ua')}`\n"
-        f"⚙️ Mode: {'Copy' if s['mode']=='copy' else 'Transcode'}\n"
-        f"🟢 Status: {'Running' if s.get('active') else 'Stopped'}\n"
-        f"🎬 FPS: {s.get('fps','?')}\n"
-        f"👥 Viewers: {viewers_count}\n"
-        f"⏱️ Uptime: {uptime}\n"
-    )
-    if s["type"] == "hls":
-        text += f"\n🔗 HLS: {BASE_URL}:{PORT}/live/{sid}/index.m3u8"
-    else:
-        text += f"\n📡 RTMP: {s.get('rtmp_server')}/{s.get('rtmp_key')}"
-    return text
+reply_kb = ReplyKeyboardMarkup([
+    ["📺 HLS List", "📡 RTMP List"],
+    ["➕ Add Stream", "🖥 Server Status"],
+    ["🧹 Clean Files"]
+], resize_keyboard=True)
 
-def stream_panel_keyboard(sid, s):
+def inline_main():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📺 HLS List", callback_data="list_hls")],
+        [InlineKeyboardButton("📡 RTMP List", callback_data="list_rtmp")],
+        [InlineKeyboardButton("➕ Add Stream", callback_data="add_stream")],
+        [InlineKeyboardButton("🖥 Server Status", callback_data="monitor")],
+        [InlineKeyboardButton("🧹 Clean Files", callback_data="clean")]
+    ])
+
+def streams_list(typ):
+    kb = []
+    for sid, s in streams.items():
+        if s["type"] == typ:
+            status = "🟢" if s.get("active") else "🔴"
+            kb.append([InlineKeyboardButton(f"{status} {s['name']}", callback_data=f"open_{sid}")])
+    kb.append([InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")])
+    return InlineKeyboardMarkup(kb)
+
+def panel_keyboard(sid, s):
     active = s.get("active", False)
     mode = s.get("mode", "copy")
     typ = s.get("type", "hls")
@@ -177,17 +152,13 @@ def stream_panel_keyboard(sid, s):
             InlineKeyboardButton("📡 RTMP Server", callback_data=f"rtmpsrv_{sid}"),
             InlineKeyboardButton("🔑 RTMP Key", callback_data=f"rtmpkey_{sid}")
         ])
-    toggle_text = "🔄 Copy" if mode == "encode" else "⚙️ Transcode"
-    kb.append([InlineKeyboardButton(toggle_text, callback_data=f"mode_{sid}")])
+    toggle = "🔄 Copy" if mode == "encode" else "⚙️ Transcode"
+    kb.append([InlineKeyboardButton(toggle, callback_data=f"mode_{sid}")])
     kb.append([InlineKeyboardButton("🗑 Delete", callback_data=f"del_{sid}")])
     if active:
         viewers_count = len(viewers.get(sid, set()))
-        uptime = "00:00:00"
-        if s.get("start_time"):
-            uptime = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
-        mode_label = "COPY" if mode == "copy" else "TRANSCODE"
-        info = f"FPS:{s.get('fps','?')} | 👥{viewers_count} | ⏱️{uptime} | {mode_label}"
-        kb.append([InlineKeyboardButton(info, callback_data="noop")])
+        uptime = time.strftime("%H:%M:%S", time.gmtime(time.time() - s["start_time"]))
+        kb.append([InlineKeyboardButton(f"FPS:{s.get('fps','?')} | 👥{viewers_count} | ⏱️{uptime}", callback_data="noop")])
     kb.append([InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")])
     return InlineKeyboardMarkup(kb)
 
@@ -195,70 +166,45 @@ async def update_panel(sid, bot):
     s = streams.get(sid)
     if not s or not s.get("chat_id") or not s.get("message_id"):
         return
+    text = (
+        f"🎛️ **{s['name']}**\n"
+        f"📥 Source: `{s['source']}`\n"
+        f"🖼 Logo: {'✅' if s.get('logo') else '❌'}\n"
+        f"⚙️ Mode: {'Copy' if s['mode']=='copy' else 'Transcode'}\n"
+        f"🟢 Status: {'Running' if s.get('active') else 'Stopped'}\n"
+        f"🎬 FPS: {s.get('fps','?')}\n"
+        f"👥 Viewers: {len(viewers.get(sid, set()))}\n"
+        f"⏱️ Uptime: {time.strftime('%H:%M:%S', time.gmtime(time.time() - s['start_time'])) if s.get('start_time') else '00:00:00'}\n"
+    )
+    if s["type"] == "hls":
+        text += f"\n🔗 {BASE_URL}:{PORT}/live/{sid}/index.m3u8"
+    else:
+        text += f"\n📡 {s.get('rtmp_server')}/{s.get('rtmp_key')}"
     try:
-        text = get_panel_text(sid)
-        await bot.edit_message_text(
-            chat_id=s["chat_id"],
-            message_id=s["message_id"],
-            text=text,
-            reply_markup=stream_panel_keyboard(sid, s),
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        if "Message is not modified" not in str(e):
-            print(f"Panel update error: {e}")
+        await bot.edit_message_text(text, chat_id=s["chat_id"], message_id=s["message_id"],
+                                    reply_markup=panel_keyboard(sid, s), parse_mode="Markdown")
+    except: pass
 
 # =========================================
-# STREAM LISTS
+# FFMPEG STREAM - باستخدام الإعدادات من settings.json
 # =========================================
-def streams_inline_keyboard(stream_type):
-    kb = []
-    for sid, s in streams.items():
-        if s.get("type") == stream_type:
-            status = "🟢" if s.get("active") else "🔴"
-            kb.append([InlineKeyboardButton(f"{status} {s['name']}", callback_data=f"open_{sid}")])
-    if not kb:
-        kb.append([InlineKeyboardButton("❌ No streams", callback_data="noop")])
-    kb.append([InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")])
-    return InlineKeyboardMarkup(kb)
-
-def inline_main_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📺 HLS List", callback_data="list_hls")],
-        [InlineKeyboardButton("📡 RTMP List", callback_data="list_rtmp")],
-        [InlineKeyboardButton("➕ Add Stream", callback_data="add_stream")],
-        [InlineKeyboardButton("🖥 Server Status", callback_data="monitor_server")],
-        [InlineKeyboardButton("🧹 Clean Files", callback_data="clean_files")]
-    ])
-
-reply_kb = ReplyKeyboardMarkup([
-    ["📺 HLS List", "📡 RTMP List"],
-    ["➕ Add Stream", "🖥 Server Status"],
-    ["🧹 Clean Files"]
-], resize_keyboard=True)
-
-# =========================================
-# FFMPEG STREAM (Robust, low CPU, fullscreen logo)
-# =========================================
-async def run_ffmpeg(sid, bot):
+async def start_stream(sid, bot):
     s = streams[sid]
     src = s["source"]
-    mode = s.get("mode", "copy")
+    mode = s["mode"]
     ua = s.get("ua", "ExoPlayerLib/2.18.5")
     logo = s.get("logo", "")
-    typ = s.get("type", "hls")
+    typ = s["type"]
 
-    # Clean stream directory
+    # clean dir
     stream_dir = os.path.join(HLS_DIR, sid)
     if os.path.exists(stream_dir):
         shutil.rmtree(stream_dir, ignore_errors=True)
     os.makedirs(stream_dir, exist_ok=True)
     out_file = os.path.join(stream_dir, "index.m3u8")
 
-    # Common options for robustness
     base = [
-        "ffmpeg", "-loglevel", "warning",
-        "-re",
+        "ffmpeg", "-loglevel", "warning", "-re",
         "-user_agent", ua,
         "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
         "-timeout", "10000000", "-rw_timeout", "10000000",
@@ -267,97 +213,58 @@ async def run_ffmpeg(sid, bot):
         "-i", src
     ]
 
-    # Video options
     if mode == "copy":
         video = ["-c:v", "copy"]
-        filter_complex = None
-        use_logo = False
+        filter_cmd = []
     else:
-        # Transcode with very low CPU usage
-        video = [
-            "-c:v", "libx264", "-preset", PRESET, "-crf", str(CRF),
-            "-b:v", VIDEO_BITRATE, "-threads", "1",        # Use single thread to save CPU
-            "-tune", "fastdecode"
-        ]
-        # Scale to max 1080p
-        scale_filter = "[0:v]scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"
+        # استخدام الإعدادات من settings.json
+        video = ["-c:v", "libx264", "-preset", PRESET, "-crf", str(CRF),
+                 "-b:v", VIDEO_BITRATE, "-threads", str(THREADS), "-tune", TUNE]
         if logo and len(logo) > 5:
-            # Full-screen logo using scale2ref (like Rplay Server)
-            filter_complex = f"[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0"
-            use_logo = True
+            filter_cmd = ["-i", logo, "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0"]
         else:
-            filter_complex = scale_filter
-            use_logo = False
+            filter_cmd = ["-filter_complex", "[0:v]scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease"]
 
     audio = ["-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ar", "44100", "-ac", "2"]
 
-    # Build command
     if typ == "hls":
-        if use_logo:
-            cmd = base + ["-i", logo, "-filter_complex", filter_complex] + video + audio + [
-                "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
-                "-hls_flags", "delete_segments", "-y", out_file
-            ]
-        elif filter_complex:
-            cmd = base + ["-filter_complex", filter_complex] + video + audio + [
-                "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
-                "-hls_flags", "delete_segments", "-y", out_file
-            ]
-        else:
-            cmd = base + video + audio + [
-                "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
-                "-hls_flags", "delete_segments", "-y", out_file
-            ]
-    else:  # RTMP
+        cmd = base + filter_cmd + video + audio + [
+            "-f", "hls", "-hls_time", "2", "-hls_list_size", "5",
+            "-hls_flags", "delete_segments", "-y", out_file
+        ]
+    else:
         rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
-        if use_logo:
-            cmd = base + ["-i", logo, "-filter_complex", filter_complex] + video + audio + ["-f", "flv", "-y", rtmp_url]
-        elif filter_complex:
-            cmd = base + ["-filter_complex", filter_complex] + video + audio + ["-f", "flv", "-y", rtmp_url]
-        else:
-            cmd = base + video + audio + ["-f", "flv", "-y", rtmp_url]
+        cmd = base + filter_cmd + video + audio + ["-f", "flv", "-y", rtmp_url]
 
-    # Kill any previous process
     if sid in processes:
         try:
             processes[sid].terminate()
             await asyncio.sleep(1)
             processes[sid].kill()
         except: pass
-        processes.pop(sid, None)
 
-    print(f"[{sid}] Starting with command: {' '.join(cmd[:20])}...")
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE
-    )
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     processes[sid] = proc
     s["active"] = True
     s["start_time"] = time.time()
-    save_streams()
+    save()
     await update_panel(sid, bot)
 
-    async def stderr_reader():
+    async def read_stderr():
         while True:
             line = await proc.stderr.readline()
-            if not line:
-                break
-            txt = line.decode(errors="ignore").strip()
+            if not line: break
+            txt = line.decode(errors="ignore")
             m = re.search(r"fps=\s*([\d.]+)", txt)
             if m:
                 s["fps"] = m.group(1)
                 await update_panel(sid, bot)
-            if "error" in txt.lower():
-                print(f"[{sid}] ffmpeg: {txt}")
-    asyncio.create_task(stderr_reader())
+    asyncio.create_task(read_stderr())
 
-    # Wait for process to finish (it will run until stopped or error)
     await proc.wait()
     s["active"] = False
     processes.pop(sid, None)
-    save_streams()
+    save()
     await update_panel(sid, bot)
 
 async def stop_stream(sid, bot):
@@ -370,122 +277,46 @@ async def stop_stream(sid, bot):
         processes.pop(sid, None)
     if sid in streams:
         streams[sid]["active"] = False
-        save_streams()
-    # Clean HLS directory
+        save()
     stream_dir = os.path.join(HLS_DIR, sid)
     if os.path.exists(stream_dir):
         shutil.rmtree(stream_dir, ignore_errors=True)
     await update_panel(sid, bot)
 
 # =========================================
-# MONITOR LOOP (updates every 20 sec)
-# =========================================
-async def monitor_loop(update, context, chat_id, message_id):
-    global monitor_active
-    while monitor_active:
-        status = system_status()
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏹ Stop Monitor", callback_data="stop_monitor")],
-            [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]
-        ])
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=status,
-                reply_markup=kb,
-                parse_mode="Markdown"
-            )
-        except: pass
-        await asyncio.sleep(20)
-
-# =========================================
-# SAFE CALLBACK HELPERS
-# =========================================
-async def safe_answer(query, text=None, alert=False):
-    try:
-        if text:
-            await query.answer(text, show_alert=alert)
-        else:
-            await query.answer()
-    except BadRequest as e:
-        if "Query is too old" in str(e):
-            pass
-        else:
-            print(f"Answer error: {e}")
-    except: pass
-
-async def safe_edit(query, text, reply_markup=None, parse=None):
-    try:
-        if reply_markup:
-            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse)
-        else:
-            await query.edit_message_text(text, parse_mode=parse)
-    except BadRequest as e:
-        if "Message is not modified" not in str(e):
-            print(f"Edit error: {e}")
-    except: pass
-
-# =========================================
 # CALLBACK HANDLER
 # =========================================
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global monitor_active, monitor_task
-    query = update.callback_query
-    await safe_answer(query)
-    data = query.data
-    chat_id = query.message.chat_id
-    msg_id = query.message.message_id
+async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    data = q.data
+    chat_id = q.message.chat_id
+    msg_id = q.message.message_id
+
+    try:
+        await q.answer()
+    except: pass
 
     if data == "main_menu":
-        if monitor_active:
-            monitor_active = False
-            if monitor_task:
-                monitor_task.cancel()
-        await safe_edit(query, "🎬 Main Menu", reply_markup=inline_main_menu())
-        return
-
-    if data == "stop_monitor":
-        if monitor_active:
-            monitor_active = False
-            if monitor_task:
-                monitor_task.cancel()
-        await safe_edit(query, system_status(), reply_markup=inline_main_menu(), parse="Markdown")
+        await q.edit_message_text("🎬 Main Menu", reply_markup=inline_main())
         return
 
     if data == "list_hls":
-        await safe_edit(query, "📺 HLS Streams:", reply_markup=streams_inline_keyboard("hls"))
+        await q.edit_message_text("📺 HLS Streams:", reply_markup=streams_list("hls"))
         return
     if data == "list_rtmp":
-        await safe_edit(query, "📡 RTMP Streams:", reply_markup=streams_inline_keyboard("rtmp"))
+        await q.edit_message_text("📡 RTMP Streams:", reply_markup=streams_list("rtmp"))
         return
-
     if data == "add_stream":
         context.user_data["step"] = "add_name"
-        await safe_edit(query, "📝 Send stream name:")
+        await q.edit_message_text("📝 Send stream name:")
         return
-
-    if data == "monitor_server":
-        if monitor_active:
-            monitor_active = False
-            if monitor_task:
-                monitor_task.cancel()
-            await safe_edit(query, system_status(), reply_markup=inline_main_menu(), parse="Markdown")
-            return
-        status = system_status()
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏹ Stop Monitor", callback_data="stop_monitor")],
-            [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]
-        ])
-        await safe_edit(query, status, reply_markup=kb, parse="Markdown")
-        monitor_active = True
-        monitor_task = asyncio.create_task(monitor_loop(update, context, chat_id, msg_id))
+    if data == "monitor":
+        await q.edit_message_text(system_status(), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
         return
-
-    if data == "clean_files":
+    if data == "clean":
         shutil.rmtree(HLS_DIR, ignore_errors=True)
         os.makedirs(HLS_DIR, exist_ok=True)
-        await safe_edit(query, "✅ HLS directory cleaned", reply_markup=inline_main_menu())
+        await q.edit_message_text("✅ Cleaned", reply_markup=inline_main())
         return
 
     if data.startswith("open_"):
@@ -493,72 +324,64 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if sid in streams:
             streams[sid]["chat_id"] = chat_id
             streams[sid]["message_id"] = msg_id
-            save_streams()
-            text = get_panel_text(sid)
-            await safe_edit(query, text, reply_markup=stream_panel_keyboard(sid, streams[sid]), parse="Markdown")
+            save()
+            await update_panel(sid, context.bot)
         else:
-            await safe_edit(query, "❌ Stream not found")
+            await q.edit_message_text("❌ Not found")
         return
 
     if data.startswith("start_"):
         sid = data[6:]
-        s = streams.get(sid)
-        if not s:
-            await safe_answer(query, "❌ Not found", alert=True)
-            return
-        if not s.get("source"):
-            await safe_answer(query, "❌ No source!", alert=True)
-            return
-        if s["type"] == "rtmp" and (not s.get("rtmp_server") or not s.get("rtmp_key")):
-            await safe_answer(query, "❌ RTMP settings incomplete", alert=True)
-            return
-        if s.get("active"):
-            await safe_answer(query, "⚠️ Already running", alert=True)
-            return
-        await safe_answer(query, "⏳ Starting...")
-        asyncio.create_task(run_ffmpeg(sid, context.bot))
+        if sid in streams:
+            s = streams[sid]
+            if not s.get("source"):
+                await q.answer("❌ No source!", show_alert=True)
+                return
+            if s["type"] == "rtmp" and (not s.get("rtmp_server") or not s.get("rtmp_key")):
+                await q.answer("❌ RTMP incomplete!", show_alert=True)
+                return
+            if s.get("active"):
+                await q.answer("⚠️ Already running", show_alert=True)
+                return
+            await q.answer("⏳ Starting...")
+            asyncio.create_task(start_stream(sid, context.bot))
         return
 
     if data.startswith("stop_"):
         sid = data[5:]
-        await safe_answer(query, "⏹ Stopping...")
+        await q.answer("⏹ Stopping...")
         asyncio.create_task(stop_stream(sid, context.bot))
         return
 
     if data.startswith("source_"):
         sid = data[7:]
         context.user_data["edit"] = ("source", sid, chat_id, msg_id)
-        await safe_edit(query, "📥 Send new source URL:")
+        await q.edit_message_text("📥 Send new source URL:")
         return
-
     if data.startswith("logo_"):
         sid = data[5:]
         context.user_data["edit"] = ("logo", sid, chat_id, msg_id)
-        await safe_edit(query, "🖼 Send logo image URL (or /skip):")
+        await q.edit_message_text("🖼 Send logo URL (or /skip):")
         return
-
     if data.startswith("ua_"):
         sid = data[3:]
         context.user_data["edit"] = ("ua", sid, chat_id, msg_id)
-        await safe_edit(query, "🕵️ Send User-Agent (or /skip):")
+        await q.edit_message_text("🕵️ Send User-Agent (or /skip):")
         return
-
     if data.startswith("rename_"):
         sid = data[7:]
         context.user_data["edit"] = ("rename", sid, chat_id, msg_id)
-        await safe_edit(query, "✏️ Send new name:")
+        await q.edit_message_text("✏️ Send new name:")
         return
-
     if data.startswith("rtmpsrv_"):
         sid = data[8:]
         context.user_data["edit"] = ("rtmp_server", sid, chat_id, msg_id)
-        await safe_edit(query, "📡 Send RTMP server URL:")
+        await q.edit_message_text("📡 Send RTMP server URL:")
         return
-
     if data.startswith("rtmpkey_"):
         sid = data[8:]
         context.user_data["edit"] = ("rtmp_key", sid, chat_id, msg_id)
-        await safe_edit(query, "🔑 Send stream key:")
+        await q.edit_message_text("🔑 Send stream key:")
         return
 
     if data.startswith("mode_"):
@@ -567,15 +390,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             old = streams[sid]["mode"]
             new = "encode" if old == "copy" else "copy"
             streams[sid]["mode"] = new
-            save_streams()
-            await safe_answer(query, f"✅ Switched to {new}")
+            save()
+            await q.answer(f"✅ Switched to {new}")
             if streams[sid].get("active"):
                 await stop_stream(sid, context.bot)
-                asyncio.create_task(run_ffmpeg(sid, context.bot))
+                asyncio.create_task(start_stream(sid, context.bot))
             else:
                 await update_panel(sid, context.bot)
-        else:
-            await safe_answer(query, "❌ Error", alert=True)
         return
 
     if data.startswith("del_"):
@@ -583,86 +404,43 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await stop_stream(sid, context.bot)
         if sid in streams:
             del streams[sid]
-            save_streams()
-        await safe_edit(query, "🗑 Stream deleted", reply_markup=inline_main_menu())
+            save()
+        await q.edit_message_text("🗑 Deleted", reply_markup=inline_main())
         return
 
 # =========================================
-# TEXT MESSAGE HANDLER
+# TEXT HANDLER
 # =========================================
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("🚫 Unauthorized")
         return
-
     text = update.message.text
 
-    if text == "📺 HLS List":
-        await update.message.reply_text("📺 HLS Streams:", reply_markup=streams_inline_keyboard("hls"))
-        return
-    if text == "📡 RTMP List":
-        await update.message.reply_text("📡 RTMP Streams:", reply_markup=streams_inline_keyboard("rtmp"))
-        return
-    if text == "➕ Add Stream":
-        context.user_data["step"] = "add_name"
-        await update.message.reply_text("📝 Send stream name:")
-        return
-    if text == "🖥 Server Status":
-        status = system_status()
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏹ Stop Monitor", callback_data="stop_monitor")],
-            [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]
-        ])
-        msg = await update.message.reply_text(status, reply_markup=kb, parse_mode="Markdown")
-        monitor_active = True
-        monitor_task = asyncio.create_task(monitor_loop(update, context, msg.chat_id, msg.message_id))
-        return
-    if text == "🧹 Clean Files":
-        shutil.rmtree(HLS_DIR, ignore_errors=True)
-        os.makedirs(HLS_DIR, exist_ok=True)
-        await update.message.reply_text("✅ HLS directory cleaned")
-        return
-
-    # ADD STREAM: name
+    # Adding new stream
     if context.user_data.get("step") == "add_name":
         name = text.strip()
-        # Generate sid: replace spaces with underscores, keep original characters
-        base_sid = name.replace(" ", "_")
-        # Ensure sid is unique without adding random numbers unless necessary
-        if base_sid not in streams:
-            sid = base_sid
-        else:
+        sid = name.replace(" ", "_")
+        if sid in streams:
             counter = 1
-            while f"{base_sid}_{counter}" in streams:
+            while f"{sid}_{counter}" in streams:
                 counter += 1
-            sid = f"{base_sid}_{counter}"
+            sid = f"{sid}_{counter}"
         streams[sid] = {
-            "name": name,
-            "source": "",
-            "type": "hls",
-            "mode": "copy",
-            "active": False,
-            "fps": "?",
-            "ua": "ExoPlayerLib/2.18.5",
-            "logo": "",
-            "rtmp_server": "",
-            "rtmp_key": "",
-            "chat_id": None,
-            "message_id": None,
-            "start_time": 0
+            "name": name, "source": "", "type": "hls", "mode": "copy", "active": False,
+            "fps": "?", "ua": "ExoPlayerLib/2.18.5", "logo": "", "rtmp_server": "",
+            "rtmp_key": "", "chat_id": None, "message_id": None, "start_time": 0
         }
-        save_streams()
+        save()
         context.user_data["step"] = "add_source"
         context.user_data["sid"] = sid
         await update.message.reply_text("📥 Send source URL:")
         return
 
-    # ADD STREAM: source
     if context.user_data.get("step") == "add_source":
         sid = context.user_data.get("sid")
         if sid in streams:
             streams[sid]["source"] = text
-            save_streams()
+            save()
             context.user_data.pop("step")
             context.user_data.pop("sid")
             kb = InlineKeyboardMarkup([
@@ -674,12 +452,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Error")
         return
 
-    # EDIT stream parameters
+    # Editing stream parameter
     if context.user_data.get("edit"):
-        typ, sid, edit_chat_id, edit_msg_id = context.user_data["edit"]
+        typ, sid, edit_chat, edit_msg = context.user_data["edit"]
         s = streams.get(sid)
         if not s:
-            await update.message.reply_text("❌ Stream not found")
             context.user_data.pop("edit")
             return
         if typ == "source":
@@ -689,77 +466,57 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif typ == "ua":
             s["ua"] = "ExoPlayerLib/2.18.5" if text == "/skip" else text
         elif typ == "rename":
-            old = s["name"]
             s["name"] = text
-            await update.message.reply_text(f"✅ Renamed {old} → {text}")
         elif typ == "rtmp_server":
             s["rtmp_server"] = text
         elif typ == "rtmp_key":
             s["rtmp_key"] = text
-        save_streams()
+        save()
         context.user_data.pop("edit")
         await update_panel(sid, context.bot)
         await update.message.delete()
         return
 
 # =========================================
-# SET TYPE CALLBACK
+# SET TYPE
 # =========================================
 async def set_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await safe_answer(query)
-    parts = query.data.split("_", 2)
-    if len(parts) != 3:
-        await safe_edit(query, "❌ Invalid")
-        return
-    _, sid, typ = parts
+    q = update.callback_query
+    try: await q.answer()
+    except: pass
+    _, sid, typ = q.data.split("_", 2)
     if sid in streams:
         streams[sid]["type"] = typ
         if typ == "rtmp":
-            context.user_data["edit"] = ("rtmp_server", sid, query.message.chat_id, query.message.message_id)
-            await safe_edit(query, "📡 Send RTMP server URL:")
+            context.user_data["edit"] = ("rtmp_server", sid, q.message.chat_id, q.message.message_id)
+            await q.edit_message_text("📡 Send RTMP server URL:")
         else:
-            save_streams()
-            text = get_panel_text(sid)
-            await safe_edit(query, text, reply_markup=stream_panel_keyboard(sid, streams[sid]), parse="Markdown")
+            save()
+            await update_panel(sid, context.bot)
     else:
-        await safe_edit(query, "❌ Error")
+        await q.edit_message_text("❌ Error")
 
 # =========================================
-# START COMMAND
+# START
 # =========================================
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("🚫 Unauthorized")
         return
-    await update.message.reply_text(
-        "🎬 **Live Stream Bot**\n\n"
-        "Use the buttons below:\n"
-        "📺 HLS List - Show HLS streams\n"
-        "📡 RTMP List - Show RTMP streams\n"
-        "➕ Add Stream - Create new stream\n"
-        "🖥 Server Status - Monitor CPU/RAM/Disk\n"
-        "🧹 Clean Files - Clear HLS cache\n\n"
-        "To open a stream panel, click on its name in the lists.",
-        reply_markup=reply_kb
-    )
+    await update.message.reply_text("🎬 **Live Stream Bot**\nUse the buttons below.", reply_markup=reply_kb)
 
 # =========================================
 # MAIN
 # =========================================
-def main():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.create_task(start_http())
-
+async def main():
+    await start_http()
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    app.add_handler(CallbackQueryHandler(callback_handler, pattern="^(?!settype_).*"))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CallbackQueryHandler(callback, pattern="^(?!settype_).*"))
     app.add_handler(CallbackQueryHandler(set_type, pattern="^settype_"))
-
     print("🚀 Bot running...")
-    app.run_polling()
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
