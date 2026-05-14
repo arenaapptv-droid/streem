@@ -6,7 +6,7 @@
   "VIDEO_BITRATE": "7000k",
   "AUDIO_BITRATE": "128k",
   "PRESET": "ultrafast",
-  "CRF": 25,
+  "CRF": 24,
   "THREADS": 1,
   "TUNE": "fastdecode"
 }
