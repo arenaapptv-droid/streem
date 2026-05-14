@@ -104,21 +104,18 @@ async def monitor_loop(bot, chat_id, msg_id):
         await asyncio.sleep(1)
 
 # ========== واجهة البوت ==========
-# أزرار الرد الرئيسية (ReplyKeyboardMarkup) - هذه فقط هي التي تظهر في شريط الكتابة
 reply_kb = ReplyKeyboardMarkup([
     ["📺 HLS", "📡 RTMP"],
     ["➕ إضافة", "🖥 مراقبة"],
     ["🧹 تنظيف"]
 ], resize_keyboard=True)
 
-# القوائم المضمنة - لا تحتوي على الأزرار الرئيسية أبداً
 def streams_list(typ):
     kb = []
     for sid, s in streams.items():
         if s["type"] == typ:
             status = "🟢" if s.get("active") else "🔴"
             kb.append([InlineKeyboardButton(f"{status} {s['name']}", callback_data=f"open_{sid}")])
-    # زر رجوع فقط (بدون أزرار HLS/RTMP/إضافة/مراقبة/تنظيف)
     kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_to_main")])
     return InlineKeyboardMarkup(kb)
 
@@ -157,7 +154,7 @@ async def update_panel(sid, bot):
         await bot.edit_message_text(text, s["chat_id"], s["msg_id"], reply_markup=panel_keyboard(sid, s))
     except: pass
 
-# ========== تشغيل البث مع تحميل مسبق كبير ==========
+# ========== تشغيل البث مع تحميل مسبق مستمر (لعدم الانقطاع) ==========
 async def start_stream(sid, bot):
     s = streams[sid]
     src = s["source"]
@@ -172,19 +169,35 @@ async def start_stream(sid, bot):
     os.makedirs(out_dir, exist_ok=True)
     out_file = os.path.join(out_dir, "index.m3u8")
 
-    # خيارات التحميل المسبق لضمان استقرار البث (تحليل 5 ثوانٍ أو 50 ميجا)
+    # خيارات التحميل المسبق المستمر ومنع الانقطاع
     preload_opts = [
-        "-analyzeduration", "5000000",   # 5 seconds
-        "-probesize", "50000000",       # 50 MB
-        "-fflags", "nobuffer+genpts+discardcorrupt"
+        "-analyzeduration", "10000000",       # 10 ثوانٍ تحليل أولي
+        "-probesize", "100000000",           # 100 ميجابايت تحليل أولي
+        "-fflags", "nobuffer+genpts+discardcorrupt",
+        "-flags", "low_delay",
+        "-err_detect", "ignore_err",
+        "-max_muxing_queue_size", "1024",    # زيادة حجم قائمة الانتظار
+        "-rtbufsize", "100M",                # مخزن وقت حقيقي كبير
+        "-max_delay", "5000000",             # تأخير أقصى 5 ثوانٍ
+        "-threads", "2"                      # استخدام نواتين
+    ]
+
+    # إعدادات إعادة الاتصال المتقدمة
+    reconnect_opts = [
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_on_network_error", "1",
+        "-reconnect_on_http_error", "1",
+        "-reconnect_delay_max", "10",
+        "-rw_timeout", "10000000",
+        "-timeout", "10000000"
     ]
 
     if mode == "copy":
         cmd = [
             "ffmpeg", "-re",
             "-user_agent", ua,
-            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-            "-rw_timeout", "10000000",
+            *reconnect_opts,
             *preload_opts,
             "-i", src,
             "-c:v", "copy",
@@ -196,12 +209,13 @@ async def start_stream(sid, bot):
             rtmp_url = f"{s['rtmp_server']}/{s['rtmp_key']}"
             cmd += ["-f", "flv", "-y", rtmp_url]
     else:
-        # وضع الترميز مع إعدادات الجودة العالية
+        # وضع الترميز
         video_opts = [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-b:v", "9000k", "-maxrate", "9000k", "-bufsize", "18000k",
             "-vsync", "cfr", "-r", "30",
-            "-g", "90"
+            "-g", "90",
+            "-tune", "zerolatency"
         ]
         if logo and len(logo) > 5:
             filter_cmd = ["-i", logo, "-filter_complex", "[1:v][0:v]scale2ref=iw:ih[logo][ref];[ref][logo]overlay=0:0"]
@@ -210,8 +224,7 @@ async def start_stream(sid, bot):
         cmd = [
             "ffmpeg", "-re",
             "-user_agent", ua,
-            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-            "-rw_timeout", "10000000",
+            *reconnect_opts,
             *preload_opts,
             "-i", src,
             *filter_cmd,
@@ -281,7 +294,6 @@ async def callback(update, context):
     chat_id = q.message.chat_id
     msg_id = q.message.message_id
 
-    # زر رجوع: نرسل رسالة جديدة مع أزرار الرد ونحذف الرسالة القديمة
     if data == "back_to_main":
         await q.message.delete()
         await context.bot.send_message(chat_id, "القائمة الرئيسية", reply_markup=reply_kb)
@@ -292,7 +304,6 @@ async def callback(update, context):
             monitor_active = False
             if monitor_task: monitor_task.cancel()
         await q.edit_message_text(system_status())
-        # نرسل رسالة جديدة مع أزرار الرد
         await context.bot.send_message(chat_id, "القائمة الرئيسية", reply_markup=reply_kb)
         return
 
@@ -303,7 +314,6 @@ async def callback(update, context):
         await q.edit_message_text("📡 قائمة RTMP:", reply_markup=streams_list("rtmp"))
         return
 
-    # الأوامر التي تبدأ بقية الأزرار (open_, start_, stop_, src_, logo_, ua_, rename_, srv_, key_, mode_, del_)
     if data.startswith("open_"):
         sid = data[5:]
         if sid in streams:
@@ -399,7 +409,6 @@ async def handle_text(update, context):
     chat_id = update.message.chat_id
 
     if text == "📺 HLS":
-        # إرسال قائمة HLS كأزرار مضمنة
         await update.message.reply_text("📺 قائمة HLS:", reply_markup=streams_list("hls"))
         return
     if text == "📡 RTMP":
@@ -427,7 +436,6 @@ async def handle_text(update, context):
         await update.message.reply_text("تم التنظيف")
         return
 
-    # إضافة بث جديد
     if context.user_data.get("step") == "add_name":
         name = text.strip()
         sid = name.replace(" ", "_")
@@ -452,7 +460,6 @@ async def handle_text(update, context):
             await update.message.reply_text("اختر النوع:", reply_markup=kb)
         return
 
-    # تعديل بيانات البث
     if context.user_data.get("edit"):
         typ, sid, edit_chat, edit_msg = context.user_data["edit"]
         s = streams.get(sid)
