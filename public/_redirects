@@ -1,1 +1,7 @@
-/index.m3u8 https://prod-fastly-eu-west-3.video.pscp.tv/Transcoding/v1/hls/4JOtXnMTAwTwtvMXVRChImjeGEsaa9m2G2iUNNRUYTW66oataoaG5zLkWVnJWVAIH525NBN4-CCEcAahn-jzNw/non_transcode/eu-west-3/periscope-replay-direct-prod-eu-west-3-public/master_dynamic_highlatency.m3u8?type=live 302
+/live/Rplay_1.m3u8 https://prod-fastly-eu-west-3.video.pscp.tv/Transcoding/v1/hls/YdwBi5cqBPttdlJZNzvlKSXMpufheN0bA7ahN38pHcAd3nyehZKm87JHMV_wrcbEwkgnWqwWmaFWxVjUlSJiFQ/non_transcode/eu-west-3/periscope-replay-direct-prod-eu-west-3-public/master_dynamic_highlatency.m3u8?type=live 302
+
+/live/Rplay_2.m3u8 https://prod-fastly-eu-west-3.video.pscp.tv/Transcoding/v1/hls/thXqFP88olJjxGnj-RucpaYSymY5h8jXlQoM_W8kJwxndBvXPGHe9MkEzSNcpLqLofbd0i3QCzu1RjxCvBC_rw/non_transcode/eu-west-3/periscope-replay-direct-prod-eu-west-3-public/master_dynamic_highlatency.m3u8?type=live 302
+
+/live/Rplay_3.m3u8 https://prod-fastly-eu-west-3.video.pscp.tv/Transcoding/v1/hls/22fuWBDpsZ1ZvvFW6RD0LSES7iHNTDCLk7XOgRkGbV_emVOTypLtFm7AFZfb3BucdLdcrk9gA_IA5wHCWtZBiQ/non_transcode/eu-west-3/periscope-replay-direct-prod-eu-west-3-public/master_dynamic_playlist.m3u8?type=live 302
+
+/live/Rplay_4.m3u8 https://prod-fastly-eu-west-3.video.pscp.tv/Transcoding/v1/hls/hViFNFl5iorCB3gmiBRlIXdBV-4xJBNAaZOwutblb2-uYww3M_QWu0VyKMC97J4px0okqCC-IEg5-ji-EIlM-Q/non_transcode/eu-west-3/periscope-replay-direct-prod-eu-west-3-public/master_dynamic_highlatency.m3u8?type=live 302
