@@ -2,7 +2,7 @@
 
 /live/Rplay_2/index.m3u8 https://pub-5d579cce1f8f4f8faf00f60ef6a6b791.r2.dev/Bein2.m3u8 302
 
-/live/Rplay_3/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/innD9M5-cthmO1NMXBhT6uQebJkzHDyF1Uxe71Fu6JJQHCmzy7K6d0HkmXCazA-YNECLJMaB1_tkUi8S3JPQnQ/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
+/live/Rplay_3/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/vfB1Gc13dIPDwaxbWvZQ5Raxf6OxwYFNQvSb0QWN3DjFy_swr6mSGoZ6rg16uPy6HkE5jiZxHlpMONPqG4ZcCA/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
 
 /live/Rplay_4/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/aOMRVESkpuSU511sRHXJRiMofYPiQKuD_xfPraK4t_rF7eEGvpzaIBy0qVN21TWJDKqsRLln3vb0OkhrErZhNg/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
 
