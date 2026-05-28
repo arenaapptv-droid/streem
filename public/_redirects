@@ -12,7 +12,7 @@
 
 
 
-/live/WorldCup/max1/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/Qn7Y00uqDKPXS8N0x_rbKFYM0igweXIqGVU7HFL4E66kAvspacW4yTkA51DlyfZPgQtXFxb0KCHooA50CiIwqw/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
+/live/WorldCup/max1/index.m3u8 https://files.catbox.moe/4liy8i.mp4 302
 /live/WorldCup/max2/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/zJj5EIrprdD-H3OtSIQ1FY-245E6F3ByOVsi8tStKeRJ2iVUf0SmBRzgsZMamSJX522ejQ5fyzvQB76WJiicQQ/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
 /live/news/aic/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/dTKLUGPxyPJS19pUNs-oZJEKVerLDktRkcu_aAsqOcB3aULRImVW0qwvmAPHOCxea0CPUPyuBG2Lodnyv29WQg/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
 /live/alwan_1/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/lbojaSvpxDjSkYzbFHLY3FuTNLYoB6au3k74ZjN7TMeqGhlb3rXOA1Q4BN9riKGtZKbEaGJGurRufHbqkcrB-g/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
