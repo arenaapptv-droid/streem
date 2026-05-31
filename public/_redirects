@@ -19,7 +19,7 @@
 /live/Rplay_7/index.m3u8 https://prod-fastly-eu-west-3.video.pscp.tv/Transcoding/v1/hls/0Y6N-Zx_F7EhyXpdEPl_EWHanTas2RPyFwZngw4fDtarXMpqNGqauh763ZNZ4m0Gd36G5Cg1K9PKlKCdHe1XcQ/non_transcode/eu-west-3/periscope-replay-direct-prod-eu-west-3-public/master_dynamic_highlatency.m3u8?type=live 302
 /live/Rplay_8/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/VdZUeK_sgKqNowfJC_zluY8ijnL750poVvfuN0s4-VyxsdcQSlDS_eBuxlceyuSL9pFp1mkGc0_18212lx7hcQ/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
 /live/Rplay_9/index.m3u8 https://prod-fastly-ap-northeast-1.video.pscp.tv/Transcoding/v1/hls/ho3wgppgBfldiUOU4zHux9Znovl4aPPYYQNT8KqXsB9NiQhEKaSydaLmNdX2HRkfcqyj7YXpuhTn7WOkamtfhA/non_transcode/ap-northeast-1/periscope-replay-direct-prod-ap-northeast-1-public/master_dynamic_highlatency.m3u8?type=live 302
-/live/WorldCup/max3/index.m3u8 https://streem.rodoye.com/b1.m3u8 302
+/live/WorldCup/ma/x3/index.m3u8 https://streem.rodoye.com/b1.m3u8 302
 /live/WorldCup/max4/index.m3u8 https://streem.rodoye.com/b1.m3u8 302
 /live/Fourth_Sport-1/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/-b0J2EbbiS8Ae2rV_iNNteh3l4drXiWNuhY_d-2pc7uKhkg6DUvC2STumdFqlW5CcxgvrZIGEMySpXsdiimjqA/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
 /live/Fourth_Sport-2/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/-b0J2EbbiS8Ae2rV_iNNteh3l4drXiWNuhY_d-2pc7uKhkg6DUvC2STumdFqlW5CcxgvrZIGEMySpXsdiimjqA/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
