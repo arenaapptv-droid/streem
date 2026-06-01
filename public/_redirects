@@ -30,3 +30,4 @@
 /live/ameer/max_1/index.m3u8 b 302
 /live/rodo/max_1/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/Qn7Y00uqDKPXS8N0x_rbKFYM0igweXIqGVU7HFL4E66kAvspacW4yTkA51DlyfZPgQtXFxb0KCHooA50CiIwqw/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
 /live/rodo/max_2/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/zJj5EIrprdD-H3OtSIQ1FY-245E6F3ByOVsi8tStKeRJ2iVUf0SmBRzgsZMamSJX522ejQ5fyzvQB76WJiicQQ/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
+/live/b_1/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/RQjWX5SUJETIkwj-QmqMnaRwp7vNABlIpx3RKrBoQUsMNY53Jwr8_u5J24ReHdfRNyRIZfOmeatHuHxpPn5ruA/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
