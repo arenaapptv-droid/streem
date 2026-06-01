@@ -1,6 +1,6 @@
 /live/Rplay_1/index.m3u8 https://streem.rodoye.com/b1.m3u8 302
 
-/live/Rplay_2/index.m3u8 https://prod-fastly-eu-west-3.video.pscp.tv/Transcoding/v1/hls/Pxj6iBCqVawcSrwr_eqeejYbzst1B9G3gNjdh6jmDNYUAh6PeMyEF9IG46AcjnuacNZbiVsOqqqNhYmvM6nHPw/non_transcode/eu-west-3/periscope-replay-direct-prod-eu-west-3-public/master_dynamic_highlatency.m3u8?type=live 302
+/live/Rplay_2/index.m3u8 https://streem.rodoye.com/b1.m3u8 302
 
 /live/Rplay_3/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/vfB1Gc13dIPDwaxbWvZQ5Raxf6OxwYFNQvSb0QWN3DjFy_swr6mSGoZ6rg16uPy6HkE5jiZxHlpMONPqG4ZcCA/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
 
