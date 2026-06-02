@@ -11,7 +11,6 @@
 
 /live/news/aic/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/_upK_DVdmI2Nc-zx3w1lZg96_SkPBCniqdvnyC6ILwT8C-wiV6bI2TKr2Cmm04oO-WAxl-9tgkPv0aq5ZXSFlA/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
 /live/Rplay_7/index.m3u8 https://streem.rodoye.com/b1.m3u8 302
-/live/Rplay_9/index.m3u8 https://streem.rodoye.com/b1.m3u8 302
 /live/Fourth_Sport-1/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/-b0J2EbbiS8Ae2rV_iNNteh3l4drXiWNuhY_d-2pc7uKhkg6DUvC2STumdFqlW5CcxgvrZIGEMySpXsdiimjqA/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
 /live/Fourth_Sport-2/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/-b0J2EbbiS8Ae2rV_iNNteh3l4drXiWNuhY_d-2pc7uKhkg6DUvC2STumdFqlW5CcxgvrZIGEMySpXsdiimjqA/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
 /live/rr/max1/index.m3u8 https://streem.rodoye.com/rodo/piracy.m3u8 302
