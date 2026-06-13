@@ -13,7 +13,7 @@
 /live/ameer/max_1/index.m3u8 b 302
 /live/rodo/max_1/index.m3u8 https://streem.rodoye.com/rodo/piracy.m3u8 302
 /live/rodo/max_2/index.m3u8 https://streem.rodoye.com/rodo/piracy.m3u8 302
-/live/b_1/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/S9iBkigknANIbHovjlNtnBpI05msMD6P0cUS3HJMi4nDP696qUuZntT8dflIbUYcKJVENYk_0nNn6mNZsgcGNA/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
+/live/b_1/index.m3u8 http://core.itsall.pro:80/live/Allgoodlotfi/hhDZSxCpeD/261646.m3u8 302
 /live/b_2/index.m3u8 https://prod-fastly-ap-northeast-1.video.pscp.tv/Transcoding/v1/hls/jXdREfE7ISGYKC89velnjDDuJQzDCY8I0qwrvt_HAJiJH_cJ7krzC-nbVrMlKsfHgnlrTCLPAxcAZm3rYOT_1w/non_transcode/eu-west-3/periscope-replay-direct-prod-eu-west-3-public/master_dynamic_highlatency.m3u8?type=live 302
 /live/b_3/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/1BKmX8C1YHVkXcMULzMsuvzlWWnbHpTT6MssmJUNxbKHUYj18Q6-fYpnv2OtrFOz_rnxwamGRY4bhxsf1nCI-w/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
 /live/b_4/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/8piWi2SAzWP7dI3rOnflCkKf_0USNeRGeGNcaKFfEYV66gHt_ik6Da7J_KiHvi7Fmmj-WvxbDRLFfPeantz_8w/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
