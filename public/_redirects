@@ -9,7 +9,7 @@
 /live/news/aic/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/Fqke02xqAtER0tVatc6X-lOxYXhqzX0A20q0kqRALcrx7BnkKFipVkFRZ2mjgh-NIpHwD2L1v7vCGQ5SdqS97A/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
 /live/Fourth_Sport-1/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/-b0J2EbbiS8Ae2rV_iNNteh3l4drXiWNuhY_d-2pc7uKhkg6DUvC2STumdFqlW5CcxgvrZIGEMySpXsdiimjqA/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
 /live/Fourth_Sport-2/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/-b0J2EbbiS8Ae2rV_iNNteh3l4drXiWNuhY_d-2pc7uKhkg6DUvC2STumdFqlW5CcxgvrZIGEMySpXsdiimjqA/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-public/master_dynamic_highlatency.m3u8?type=live 302
-/live/rr/max2/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/oXpMrXumV8Q7M1k9FWC66fXKRz0UADtMU4sgLuGcNgiakVWTM9VY0neKxmEtuYNRrqWrlgCIzpwryDRfl9ZHLQ/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-private/st_master_dynamic_highlatency.m3u8?type=live 302
+/live/rr/max2/index.m3u8 https://prod-fastly-eu-central-1.video.pscp.tv/Transcoding/v1/hls/8bbnqMLkcO-IQFkp4XMfmUM0-zuFB9a2jNB_WNtdX-IV8xyGWBIkye113b9rftoSH0Vwqai0CQFVU85KmTf15A/non_transcode/eu-central-1/periscope-replay-direct-prod-eu-central-1-private/st_master_dynamic_highlatency.m3u8?type=live 302
 /live/ameer/max_1/index.m3u8 b 302
 /live/rodo/max_1/index.m3u8 https://streem.rodoye.com/rodo/piracy.m3u8 302
 /live/rodo/max_2/index.m3u8 https://streem.rodoye.com/rodo/piracy.m3u8 302
